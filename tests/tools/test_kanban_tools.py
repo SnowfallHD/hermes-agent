@@ -1162,6 +1162,21 @@ def test_kanban_guidance_prompt_size_bounded(monkeypatch, tmp_path):
     )
 
 
+def test_kanban_guidance_distinguishes_artifact_completion_from_review_gates():
+    """Workers should not create fake approval blockers for safe artifacts.
+
+    Internal/draft-only artifacts can be completed when acceptance criteria are
+    met, while explicit task or board review policy still routes to review/block.
+    """
+    from agent.prompt_builder import KANBAN_GUIDANCE
+
+    assert "Do not block solely because you produced a local/internal/draft-only artifact" in KANBAN_GUIDANCE
+    assert "acceptance criteria are met" in KANBAN_GUIDANCE
+    assert "complete the task" in KANBAN_GUIDANCE
+    assert "task or board policy" in KANBAN_GUIDANCE
+    assert "review/block workflow" in KANBAN_GUIDANCE
+
+
 # ---------------------------------------------------------------------------
 # Worker task-ownership enforcement (regression tests for #19534)
 # ---------------------------------------------------------------------------
