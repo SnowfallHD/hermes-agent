@@ -1,6 +1,7 @@
 """Tests for Slack Block Kit approval buttons and thread context fetching."""
 
 import asyncio
+import json
 import os
 import sys
 from pathlib import Path
@@ -45,6 +46,18 @@ _ensure_slack_mock()
 
 from gateway.platforms.slack import SlackAdapter
 from gateway.config import Platform, PlatformConfig
+
+
+@pytest.fixture
+def kanban_home(tmp_path, monkeypatch):
+    """Isolate kanban DB state for Slack Kanban button tests."""
+    home = tmp_path / ".hermes"
+    home.mkdir()
+    monkeypatch.setenv("HERMES_HOME", str(home))
+    monkeypatch.setattr(Path, "home", lambda: tmp_path)
+    from hermes_cli import kanban_db as kb
+    kb.init_db()
+    return home
 
 
 def _make_adapter():
@@ -235,6 +248,115 @@ class TestSlackApprovalAction:
         mock_resolve.assert_called_once_with("session-key", "deny")
         update_kwargs = mock_client.chat_update.call_args[1]
         assert "Denied by alice" in update_kwargs["text"]
+
+
+# ===========================================================================
+# Kanban blocked notifications — Block Kit buttons
+# ===========================================================================
+
+class TestSlackKanbanButtons:
+    """Test Slack-native Kanban blocked/review-required actions."""
+
+    @pytest.mark.asyncio
+    async def test_send_kanban_blocked_uses_board_scoped_button_values(self):
+        adapter = _make_adapter()
+        mock_client = adapter._team_clients["T1"]
+        mock_client.chat_postMessage = AsyncMock(return_value={"ts": "2222.3333"})
+
+        result = await adapter.send_kanban_blocked(
+            chat_id="C1",
+            task_id="t_abc12345",
+            title="Needs review",
+            reason="review-required: tests pass",
+            board="projx",
+            fallback_text="fallback commands",
+            metadata={"thread_id": "9999.0000"},
+        )
+
+        assert result.success is True
+        kwargs = mock_client.chat_postMessage.call_args[1]
+        assert kwargs["thread_ts"] == "9999.0000"
+        assert kwargs["text"] == "fallback commands"
+        blocks = kwargs["blocks"]
+        action_block = next(block for block in blocks if block["type"] == "actions")
+        action_ids = {element["action_id"] for element in action_block["elements"]}
+        assert "hermes_kanban_unblock" in action_ids
+        assert "hermes_kanban_inspect" in action_ids
+        assert "hermes_kanban_comment_help" in action_ids
+        for element in action_block["elements"]:
+            payload = json.loads(element["value"])
+            assert payload["board"] == "projx"
+            assert payload["task_id"] == "t_abc12345"
+
+    @pytest.mark.asyncio
+    async def test_kanban_unblock_button_uses_payload_board_scope(self, kanban_home):
+        from hermes_cli import kanban_db as kb
+
+        kb.create_board("projx")
+        conn = kb.connect(board="projx")
+        try:
+            tid = kb.create_task(conn, title="board scoped task", assignee="worker1")
+            kb.block_task(conn, tid, reason="needs approval")
+        finally:
+            conn.close()
+
+        adapter = _make_adapter()
+        mock_client = adapter._team_clients["T1"]
+        mock_client.chat_update = AsyncMock()
+        ack = AsyncMock()
+        body = {
+            "message": {
+                "ts": "2222.3333",
+                "blocks": [{"type": "section", "text": {"type": "mrkdwn", "text": "blocked"}}],
+            },
+            "channel": {"id": "C1"},
+            "user": {"id": "U1", "name": "coop"},
+        }
+        action = {
+            "action_id": "hermes_kanban_unblock",
+            "value": json.dumps({"board": "projx", "task_id": tid, "action": "unblock"}),
+        }
+
+        await adapter._handle_kanban_action(ack, body, action)
+
+        ack.assert_called_once()
+        conn = kb.connect(board="projx")
+        try:
+            task = kb.get_task(conn, tid)
+        finally:
+            conn.close()
+        assert task.status == "ready"
+        update_kwargs = mock_client.chat_update.call_args[1]
+        assert "Resumed by coop" in update_kwargs["text"]
+
+    @pytest.mark.asyncio
+    async def test_kanban_comment_help_button_preserves_board_scope(self, kanban_home):
+        adapter = _make_adapter()
+        mock_client = adapter._team_clients["T1"]
+        mock_client.chat_update = AsyncMock()
+        mock_client.chat_postMessage = AsyncMock()
+        ack = AsyncMock()
+        body = {
+            "message": {
+                "ts": "2222.3333",
+                "thread_ts": "1111.0000",
+                "blocks": [{"type": "section", "text": {"type": "mrkdwn", "text": "blocked"}}],
+            },
+            "channel": {"id": "C1"},
+            "user": {"id": "U1", "name": "coop"},
+        }
+        action = {
+            "action_id": "hermes_kanban_comment_help",
+            "value": json.dumps({"board": "projx", "task_id": "t_abc12345", "action": "comment_help"}),
+        }
+
+        await adapter._handle_kanban_action(ack, body, action)
+
+        ack.assert_called_once()
+        mock_client.chat_update.assert_called_once()
+        post_kwargs = mock_client.chat_postMessage.call_args[1]
+        assert post_kwargs["thread_ts"] == "1111.0000"
+        assert "!kanban --board projx comment t_abc12345 <your note>" in post_kwargs["text"]
 
 
 # ===========================================================================

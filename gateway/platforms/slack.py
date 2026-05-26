@@ -672,6 +672,14 @@ class SlackAdapter(BasePlatformAdapter):
             ):
                 self._app.action(_action_id)(self._handle_approval_action)
 
+            # Register Block Kit action handlers for Kanban blocked/review buttons.
+            for _action_id in (
+                "hermes_kanban_unblock",
+                "hermes_kanban_inspect",
+                "hermes_kanban_comment_help",
+            ):
+                self._app.action(_action_id)(self._handle_kanban_action)
+
             # Register Block Kit action handlers for slash-confirm buttons
             # (generic three-option prompts; see tools/slash_confirm.py).
             for _action_id in (
@@ -947,15 +955,17 @@ class SlackAdapter(BasePlatformAdapter):
     def _dm_top_level_threads_as_sessions(self) -> bool:
         """Whether top-level Slack DMs get per-message session threads.
 
-        Defaults to ``True`` so each visible DM reply thread is isolated as its
-        own Hermes session — matching the per-thread behavior channels already
-        have.  Set ``platforms.slack.extra.dm_top_level_threads_as_sessions``
-        to ``false`` in config.yaml to revert to the legacy behavior where all
-        top-level DMs share one continuous session.
+        Defaults to ``False`` so ordinary Slack DM conversations use one
+        canonical Hermes session per DM channel.  Slack message timestamps are
+        still used as reply anchors for visible threading, but they do not enter
+        the Hermes session key unless this opt-in is enabled.  Set
+        ``platforms.slack.extra.dm_top_level_threads_as_sessions`` to ``true``
+        in config.yaml only if you explicitly want each top-level DM message to
+        start a separate Hermes session.
         """
         raw = self.config.extra.get("dm_top_level_threads_as_sessions")
         if raw is None:
-            return True  # default: each DM thread is its own session
+            return False  # default: one canonical session per Slack DM channel
         return str(raw).strip().lower() in {"1", "true", "yes", "on"}
 
     def _resolve_thread_ts(
@@ -1764,6 +1774,130 @@ class SlackAdapter(BasePlatformAdapter):
         self._cache_assistant_thread_metadata(metadata)
         self._seed_assistant_thread_session(metadata)
 
+    async def _observe_kryden_coordination_event(self, event: dict) -> None:
+        """Passive live observer for Kryden/Viktor Slack coordination.
+
+        This is intentionally side-channel only: it records relevant events and
+        optionally alerts the configured Slack home DM for actionable items. It
+        must not post back into the source thread, because that would turn every
+        observed Viktor message into an agent-to-agent loop.
+        """
+        try:
+            state_dir = _Path(os.environ.get("HERMES_HOME") or str(_Path.home() / ".hermes")) / "kryden"
+            state_dir.mkdir(parents=True, exist_ok=True)
+            journal_path = state_dir / "slack_viktor_coordination_journal.jsonl"
+            seen_path = state_dir / "slack_viktor_live_seen.json"
+
+            ts = str(event.get("ts") or "")
+            channel = str(event.get("channel") or "")
+            if not ts or not channel:
+                return
+
+            try:
+                seen = json.loads(seen_path.read_text()) if seen_path.exists() else {}
+            except Exception:
+                seen = {}
+            key = f"{channel}:{ts}"
+            if key in seen:
+                return
+            now = int(time.time())
+            seen[key] = now
+            # Keep two weeks of de-dupe state; this file stays tiny in practice.
+            seen = {k: v for k, v in seen.items() if now - int(v) < 14 * 86400}
+            tmp_seen = seen_path.with_suffix(".tmp")
+            tmp_seen.write_text(json.dumps(seen, sort_keys=True))
+            tmp_seen.replace(seen_path)
+
+            viktor_user_id = os.getenv("KRYDEN_VIKTOR_USER_ID", "U0B0YLS5MN3")
+            hermes_user_id = self._bot_user_id or os.getenv("KRYDEN_HERMES_USER_ID", "U0B5PPKPZNF")
+            user = str(event.get("user") or "")
+            raw_text = event.get("text") or ""
+            text = re.sub(r"<@([A-Z0-9]+)>", r"@\1", raw_text)
+            text = re.sub(r"\s+", " ", text).strip()
+
+            from_viktor = user == viktor_user_id
+            mentions_hermes = bool(hermes_user_id and f"<@{hermes_user_id}>" in raw_text)
+            mentions_viktor = f"<@{viktor_user_id}>" in raw_text
+            relevant = bool(
+                from_viktor
+                or mentions_hermes
+                or mentions_viktor
+                or re.search(
+                    r"\b(hermes|viktor|victor|kryden|shipyard|blocked|blocker|approve|approval|launch|distribution|growth|mrr|handoff)\b",
+                    text,
+                    re.I,
+                )
+            )
+            if not relevant:
+                return
+
+            actionable = bool(
+                from_viktor
+                and re.search(
+                    r"\?|\b(can you|could you|should we|need hermes|need coop|blocked|blocker|waiting on|approve|approval)\b",
+                    text,
+                    re.I,
+                )
+            ) or bool(mentions_hermes and re.search(r"\?|\b(need|blocked|approve|approval|thoughts)\b", text, re.I))
+            handoff = bool(
+                from_viktor
+                and re.search(r"\b(done|ready|built|shipped|implemented|drafted|created|completed|handoff|here('s| is))\b", text, re.I)
+            )
+            if actionable:
+                action_type = "reply_or_unblock_needed"
+                response_policy = "consider_reply_or_escalate"
+            elif handoff:
+                action_type = "handoff_or_deliverable"
+                response_policy = "inspect_store_use_then_maybe_ack"
+            elif from_viktor:
+                action_type = "store_context"
+                response_policy = "store_no_reply"
+            else:
+                action_type = "coordination_context"
+                response_policy = "store_monitor_thread"
+
+            thread_ts = str(event.get("thread_ts") or ts)
+            record = {
+                "detected_at": now,
+                "mode": "live_socket_event",
+                "channel": channel,
+                "thread_ts": thread_ts,
+                "ts": ts,
+                "user": user,
+                "action_type": action_type,
+                "response_policy": response_policy,
+                "text": text[:4000],
+            }
+            with journal_path.open("a", encoding="utf-8") as f:
+                f.write(json.dumps(record, sort_keys=True) + "\n")
+
+            # Queue relevant events for the structured decision worker. The
+            # observer stays fast/non-blocking; the worker can use an LLM to
+            # decide reply/store/act/escalate and execute only low-risk replies.
+            queue_path = state_dir / "viktor_decision_queue.jsonl"
+            should_queue = bool(
+                user != hermes_user_id
+                and (from_viktor or mentions_hermes or mentions_viktor or "hermes" in text.lower())
+            )
+            if should_queue:
+                with queue_path.open("a", encoding="utf-8") as f:
+                    f.write(json.dumps(record, sort_keys=True) + "\n")
+                worker = _Path(os.environ.get("HERMES_HOME") or str(_Path.home() / ".hermes")) / "scripts" / "viktor_decision_worker.py"
+                if worker.exists():
+                    try:
+                        asyncio.create_task(
+                            asyncio.create_subprocess_exec(
+                                sys.executable,
+                                str(worker),
+                                stdout=asyncio.subprocess.DEVNULL,
+                                stderr=asyncio.subprocess.DEVNULL,
+                            )
+                        )
+                    except Exception as launch_exc:
+                        logger.debug("[Slack] Viktor decision worker launch failed: %s", launch_exc)
+        except Exception as exc:
+            logger.debug("[Slack] passive Kryden observer failed: %s", exc, exc_info=True)
+
     async def _handle_slack_message(self, event: dict) -> None:
         """Handle an incoming Slack message event."""
         # Dedup: Slack Socket Mode can redeliver events after reconnects (#4777)
@@ -1771,26 +1905,51 @@ class SlackAdapter(BasePlatformAdapter):
         if event_ts and self._dedup.is_duplicate(event_ts):
             return
 
+        # Passive Kryden/Viktor observer runs before bot filtering because Viktor
+        # is itself a Slack bot user. This side-channel never replies; it only
+        # journals/classifies relevant coordination events.
+        await self._observe_kryden_coordination_event(event)
+
         # Bot message filtering (SLACK_ALLOW_BOTS / config allow_bots):
         #   "none"     — ignore all bot messages (default, backward-compatible)
         #   "mentions" — accept bot messages only when they @mention us
         #   "all"      — accept all bot messages (except our own)
         if event.get("bot_id") or event.get("subtype") == "bot_message":
-            allow_bots = self.config.extra.get("allow_bots", "")
-            if not allow_bots:
-                allow_bots = os.getenv("SLACK_ALLOW_BOTS", "none")
-            allow_bots = str(allow_bots).lower().strip()
-            if allow_bots == "none":
-                return
-            elif allow_bots == "mentions":
-                text_check = event.get("text", "")
-                if self._bot_user_id and f"<@{self._bot_user_id}>" not in text_check:
-                    return
-            # "all" falls through to process the message
-            # Always ignore our own messages to prevent echo loops
             msg_user = event.get("user", "")
+            # Always ignore our own messages to prevent echo loops.
             if msg_user and self._bot_user_id and msg_user == self._bot_user_id:
                 return
+
+            # Coop-approved Kryden exception: Viktor sometimes writes plain
+            # "@Hermes" instead of a real Slack mention. If Viktor addresses
+            # Hermes with an actionable/question-style message, let it continue
+            # into the normal agent routing path; later routing treats the plain
+            # address like a mention. This is deliberately narrow to avoid
+            # turning all bot chatter into Hermes replies.
+            raw_bot_text = event.get("text", "") or ""
+            viktor_user_id = os.getenv("KRYDEN_VIKTOR_USER_ID", "U0B0YLS5MN3")
+            viktor_directed_hermes = bool(
+                msg_user == viktor_user_id
+                and re.search(r"(^|\s)@?Hermes\b|<@%s>" % re.escape(self._bot_user_id or ""), raw_bot_text, re.I)
+                and re.search(
+                    r"\?|\b(can you|could you|should we|need|thoughts|blocked|blocker|waiting on|approve|approval|have you spotted|want to make sure|if you spot|drop them|send them|surface|let me know)\b",
+                    raw_bot_text,
+                    re.I,
+                )
+            )
+
+            if not viktor_directed_hermes:
+                allow_bots = self.config.extra.get("allow_bots", "")
+                if not allow_bots:
+                    allow_bots = os.getenv("SLACK_ALLOW_BOTS", "none")
+                allow_bots = str(allow_bots).lower().strip()
+                if allow_bots == "none":
+                    return
+                elif allow_bots == "mentions":
+                    text_check = event.get("text", "")
+                    if self._bot_user_id and f"<@{self._bot_user_id}>" not in text_check:
+                        return
+            # "all" and the Viktor-directed-Hermes exception fall through.
 
         # Ignore message edits and deletions
         subtype = event.get("subtype")
@@ -1938,10 +2097,12 @@ class SlackAdapter(BasePlatformAdapter):
         # Build thread_ts for session keying.
         # In channels: fall back to ts so each top-level @mention starts a
         #   new thread/session (the bot always replies in a thread).
-        # In DMs: fall back to ts so each top-level DM reply thread gets
-        #   its own session key (matching channel behavior). Set
-        #   dm_top_level_threads_as_sessions: false in config to revert to
-        #   legacy single-session-per-DM-channel behavior.
+        # In DMs: default to one canonical session per DM channel. A top-level
+        #   DM's message ts is still available as MessageEvent.message_id, so
+        #   visible progress/final replies can thread under the current Slack
+        #   message without fragmenting Hermes history. Set
+        #   dm_top_level_threads_as_sessions: true to opt into per-message DM
+        #   sessions.
         if is_dm:
             thread_ts = event.get("thread_ts") or assistant_meta.get("thread_ts")
             if not thread_ts and self._dm_top_level_threads_as_sessions():
@@ -1959,6 +2120,20 @@ class SlackAdapter(BasePlatformAdapter):
         bot_uid = self._team_bot_user_ids.get(team_id, self._bot_user_id)
         routing_text = original_text or ""
         is_mentioned = bot_uid and f"<@{bot_uid}>" in routing_text
+        # Treat Viktor's plain-text "@Hermes" / "Hermes" actionable asks as a
+        # real mention. Slack bots sometimes fail to emit a proper mention token,
+        # but Coop wants this to flow through the same conditional reply loop.
+        viktor_plain_hermes_ask = bool(
+            event.get("user") == os.getenv("KRYDEN_VIKTOR_USER_ID", "U0B0YLS5MN3")
+            and re.search(r"(^|\s)@?Hermes\b", routing_text, re.I)
+            and re.search(
+                r"\?|\b(can you|could you|should we|need|thoughts|blocked|blocker|waiting on|approve|approval|have you spotted|want to make sure|if you spot|drop them|send them|surface|let me know)\b",
+                routing_text,
+                re.I,
+            )
+        )
+        if viktor_plain_hermes_ask:
+            is_mentioned = True
         event_thread_ts = event.get("thread_ts")
         is_thread_reply = bool(event_thread_ts and event_thread_ts != ts)
 
@@ -1995,8 +2170,10 @@ class SlackAdapter(BasePlatformAdapter):
                     return
 
         if is_mentioned:
-            # Strip the bot mention from the text
+            # Strip the bot mention / plain Viktor address from the text
             text = text.replace(f"<@{bot_uid}>", "").strip()
+            if 'viktor_plain_hermes_ask' in locals() and viktor_plain_hermes_ask:
+                text = re.sub(r"(^|\s)@?Hermes\b[:,\s-]*", " ", text, count=1, flags=re.I).strip()
             # Register this thread so all future messages auto-trigger the bot.
             # Skipped in strict mode: strict_mention=true bots must be
             # re-mentioned every turn, so remembering the thread would
@@ -2318,6 +2495,188 @@ class SlackAdapter(BasePlatformAdapter):
         except Exception as e:
             logger.error("[Slack] send_exec_approval failed: %s", e, exc_info=True)
             return SendResult(success=False, error=str(e))
+
+    async def send_kanban_blocked(
+        self, chat_id: str, task_id: str, title: str, reason: str = "",
+        board: Optional[str] = None, fallback_text: str = "",
+        metadata: Optional[Dict[str, Any]] = None,
+    ) -> SendResult:
+        """Send a Slack-native Kanban blocked notification with action buttons.
+
+        Button values carry both board and task id so callbacks cannot
+        accidentally unblock/inspect a same-looking task id on another board.
+        Other platforms continue to receive the fallback text commands from
+        the gateway notifier.
+        """
+        if not self._app:
+            return SendResult(success=False, error="Not connected")
+
+        try:
+            reason = (reason or "").strip()
+            board_value = board or ""
+            payload_base = {"board": board_value, "task_id": task_id}
+            section_text = f":pause_button: *Kanban {task_id} blocked* — {title}"
+            if board_value:
+                section_text += f"\nBoard: `{board_value}`"
+            if reason:
+                section_text += f"\nReason: {reason[:1500]}"
+            section_text += "\n\nUse the buttons below, or the text commands in the fallback message."
+
+            def _payload(action_name: str) -> str:
+                payload = dict(payload_base)
+                payload["action"] = action_name
+                return json.dumps(payload, separators=(",", ":"))
+
+            blocks = [
+                {
+                    "type": "section",
+                    "text": {"type": "mrkdwn", "text": section_text},
+                },
+                {
+                    "type": "actions",
+                    "elements": [
+                        {
+                            "type": "button",
+                            "text": {"type": "plain_text", "text": "Approve / Resume"},
+                            "style": "primary",
+                            "action_id": "hermes_kanban_unblock",
+                            "value": _payload("unblock"),
+                        },
+                        {
+                            "type": "button",
+                            "text": {"type": "plain_text", "text": "Inspect"},
+                            "action_id": "hermes_kanban_inspect",
+                            "value": _payload("inspect"),
+                        },
+                        {
+                            "type": "button",
+                            "text": {"type": "plain_text", "text": "Add Context"},
+                            "action_id": "hermes_kanban_comment_help",
+                            "value": _payload("comment_help"),
+                        },
+                    ],
+                },
+            ]
+            thread_ts = self._resolve_thread_ts(None, metadata)
+            kwargs: Dict[str, Any] = {
+                "channel": chat_id,
+                "text": fallback_text or f"Kanban {task_id} blocked — {title}",
+                "blocks": blocks,
+            }
+            if thread_ts:
+                kwargs["thread_ts"] = thread_ts
+            result = await self._get_client(chat_id).chat_postMessage(**kwargs)
+            return SendResult(success=True, message_id=result.get("ts", ""), raw_response=result)
+        except Exception as e:
+            logger.error("[Slack] send_kanban_blocked failed: %s", e, exc_info=True)
+            return SendResult(success=False, error=str(e))
+
+    async def _handle_kanban_action(self, ack, body, action) -> None:
+        """Handle Slack Kanban Block Kit button clicks."""
+        await ack()
+
+        action_id = action.get("action_id", "")
+        raw_value = action.get("value", "")
+        message = body.get("message", {})
+        msg_ts = message.get("ts", "")
+        channel_id = body.get("channel", {}).get("id", "")
+        user = body.get("user", {})
+        user_name = user.get("name", "unknown")
+        user_id = user.get("id", "")
+
+        allowed_csv = os.getenv("SLACK_ALLOWED_USERS", "").strip()
+        if allowed_csv:
+            allowed_ids = {uid.strip() for uid in allowed_csv.split(",") if uid.strip()}
+            if "*" not in allowed_ids and user_id not in allowed_ids:
+                logger.warning(
+                    "[Slack] Unauthorized Kanban button click by %s (%s) — ignoring",
+                    user_name, user_id,
+                )
+                return
+
+        try:
+            payload = json.loads(raw_value)
+        except Exception:
+            logger.warning("[Slack] Malformed Kanban action value: %s", raw_value)
+            return
+        board = str(payload.get("board") or "") or None
+        task_id = str(payload.get("task_id") or "")
+        requested_action = str(payload.get("action") or "")
+        if not task_id:
+            logger.warning("[Slack] Kanban action missing task_id: %s", raw_value)
+            return
+
+        original_text = ""
+        for block in message.get("blocks", []):
+            if block.get("type") == "section":
+                original_text = block.get("text", {}).get("text", "")
+                break
+
+        decision_text = f"Kanban {task_id} action failed"
+        followup_text = ""
+        try:
+            from hermes_cli import kanban_db as _kb
+            conn = _kb.connect(board=board)
+            try:
+                if action_id == "hermes_kanban_unblock" or requested_action == "unblock":
+                    ok = _kb.unblock_task(conn, task_id)
+                    decision_text = (
+                        f"✅ Kanban {task_id} Resumed by {user_name}"
+                        if ok else f"⚠️ Kanban {task_id} was not blocked/scheduled"
+                    )
+                elif action_id == "hermes_kanban_inspect" or requested_action == "inspect":
+                    task = _kb.get_task(conn, task_id)
+                    if task:
+                        decision_text = f"🔎 Kanban {task_id} inspected by {user_name}"
+                        followup_text = (
+                            f"Kanban {task_id} — {task.title}\n"
+                            f"Status: {task.status}\nAssignee: {task.assignee}\n"
+                            f"Board: {board or _kb.DEFAULT_BOARD}"
+                        )
+                    else:
+                        decision_text = f"⚠️ Kanban {task_id} not found"
+                elif action_id == "hermes_kanban_comment_help" or requested_action == "comment_help":
+                    board_hint = f" --board {board}" if board else ""
+                    decision_text = f"💬 Kanban {task_id} comment instructions requested by {user_name}"
+                    followup_text = (
+                        "Add context from Slack with:\n"
+                        f"`!kanban{board_hint} comment {task_id} <your note>`"
+                    )
+                else:
+                    logger.warning("[Slack] Unknown Kanban action_id=%s payload=%s", action_id, payload)
+                    return
+            finally:
+                conn.close()
+        except Exception as exc:
+            logger.error("Failed to resolve Kanban Slack button: %s", exc, exc_info=True)
+            decision_text = f"⚠️ Kanban {task_id} action failed: {exc}"
+
+        updated_blocks = [
+            {
+                "type": "section",
+                "text": {"type": "mrkdwn", "text": original_text or f"Kanban {task_id}"},
+            },
+            {
+                "type": "context",
+                "elements": [{"type": "mrkdwn", "text": decision_text}],
+            },
+        ]
+        try:
+            client = self._get_client(channel_id)
+            await client.chat_update(
+                channel=channel_id,
+                ts=msg_ts,
+                text=decision_text,
+                blocks=updated_blocks,
+            )
+            if followup_text:
+                post_kwargs: Dict[str, Any] = {"channel": channel_id, "text": followup_text}
+                thread_ts = message.get("thread_ts") or msg_ts
+                if thread_ts:
+                    post_kwargs["thread_ts"] = thread_ts
+                await client.chat_postMessage(**post_kwargs)
+        except Exception as e:
+            logger.warning("[Slack] Failed to update Kanban action message: %s", e)
 
     async def send_slash_confirm(
         self, chat_id: str, title: str, message: str, session_key: str,

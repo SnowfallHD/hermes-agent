@@ -4990,8 +4990,17 @@ class GatewayRunner:
                         elif kind == "blocked":
                             reason = ""
                             if ev.payload and ev.payload.get("reason"):
-                                reason = f": {str(ev.payload['reason'])[:160]}"
-                            msg = f"⏸ {tag}Kanban {sub['task_id']} blocked{reason}"
+                                reason = str(ev.payload["reason"]).strip()
+                            reason_line = f"\nReason: {reason[:600]}" if reason else ""
+                            board_hint = f" --board {board_slug}" if board_slug else ""
+                            msg = (
+                                f"⏸ {tag}Kanban {sub['task_id']} blocked — {title}"
+                                f"{reason_line}\n\n"
+                                "Actions:\n"
+                                f"- Approve/resume: `!kanban{board_hint} unblock {sub['task_id']}`\n"
+                                f"- Add context: `!kanban{board_hint} comment {sub['task_id']} <your note>`\n"
+                                f"- Inspect: `!kanban{board_hint} show {sub['task_id']}`"
+                            )
                         elif kind == "gave_up":
                             err = ""
                             if ev.payload and ev.payload.get("error"):
@@ -5023,9 +5032,25 @@ class GatewayRunner:
                             sub["chat_id"], sub.get("thread_id") or "",
                         )
                         try:
-                            await adapter.send(
-                                sub["chat_id"], msg, metadata=metadata,
-                            )
+                            kanban_blocked_sender = getattr(adapter, "send_kanban_blocked", None)
+                            supports_kanban_blocked = inspect.iscoroutinefunction(kanban_blocked_sender)
+                            if kind == "blocked" and supports_kanban_blocked:
+                                await kanban_blocked_sender(
+                                    sub["chat_id"],
+                                    task_id=sub["task_id"],
+                                    title=title,
+                                    reason=(
+                                        str(ev.payload.get("reason", "")).strip()
+                                        if ev.payload else ""
+                                    ),
+                                    board=board_slug,
+                                    fallback_text=msg,
+                                    metadata=metadata,
+                                )
+                            else:
+                                await adapter.send(
+                                    sub["chat_id"], msg, metadata=metadata,
+                                )
                             logger.debug(
                                 "kanban notifier: delivered %s event for %s to %s/%s on board %s",
                                 kind, sub["task_id"], platform_str, sub["chat_id"], board_slug,
@@ -7470,6 +7495,9 @@ class GatewayRunner:
         if canonical == "status":
             return await self._handle_status_command(event)
 
+        if canonical == "viktor-status":
+            return await self._handle_viktor_status_command(event)
+
         if canonical == "agents":
             return await self._handle_agents_command(event)
 
@@ -9706,6 +9734,29 @@ class GatewayRunner:
             logger.debug("build_recap failed in /status: %s", exc)
 
         return "\n".join(lines)
+
+    async def _handle_viktor_status_command(self, event: MessageEvent) -> str:
+        """Handle /viktor-status command for Kryden coordination observability."""
+        script = Path(os.environ.get("HERMES_HOME", str(Path.home() / ".hermes"))) / "scripts" / "viktor_status.py"
+        if not script.exists():
+            return "Viktor status script is missing: ~/.hermes/scripts/viktor_status.py"
+        try:
+            proc = await asyncio.create_subprocess_exec(
+                sys.executable,
+                str(script),
+                stdout=asyncio.subprocess.PIPE,
+                stderr=asyncio.subprocess.PIPE,
+            )
+            stdout, stderr = await asyncio.wait_for(proc.communicate(), timeout=10)
+        except asyncio.TimeoutError:
+            return "Viktor loop status timed out."
+        except Exception as exc:
+            return f"Viktor loop status failed: {exc}"
+        out = stdout.decode("utf-8", errors="replace").strip()
+        err = stderr.decode("utf-8", errors="replace").strip()
+        if proc.returncode != 0:
+            return f"Viktor loop status failed ({proc.returncode}): {err or out or 'no output'}"
+        return out or "Viktor loop status: no output"
 
     async def _handle_agents_command(self, event: MessageEvent) -> str:
         """Handle /agents command - list active agents and running tasks."""

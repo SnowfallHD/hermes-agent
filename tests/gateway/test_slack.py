@@ -2714,8 +2714,8 @@ class TestProgressMessageThread:
     """
 
     @pytest.mark.asyncio
-    async def test_dm_toplevel_progress_uses_message_ts_as_thread(self, adapter):
-        """Progress messages for a top-level DM should go into the reply thread."""
+    async def test_dm_toplevel_defaults_to_canonical_dm_session(self, adapter):
+        """Top-level Slack DMs should not fragment Hermes history by default."""
         # Simulate a top-level DM: no thread_ts in the event
         event = {
             "channel": "D_DM",
@@ -2737,22 +2737,23 @@ class TestProgressMessageThread:
         msg_event = captured_events[0]
         source = msg_event.source
 
-        # With default dm_top_level_threads_as_sessions=True, source.thread_id
-        # should equal the message ts so each DM thread gets its own session.
-        assert source.thread_id == "1234567890.000001", (
-            "source.thread_id must equal the message ts for top-level DMs "
-            "so each reply thread gets its own session"
+        # Default dm_top_level_threads_as_sessions=False: the Slack message ts
+        # remains a visible reply anchor (message_id), but it must not enter the
+        # Hermes session key via source.thread_id.
+        assert source.thread_id is None, (
+            "top-level Slack DMs must default to one canonical session per DM channel"
         )
 
         # The message_id should be the event's ts — this is what the gateway
-        # passes as event_message_id so progress messages can thread correctly
+        # can pass as event_message_id so progress/final messages can still
+        # thread visibly under the current Slack message.
         assert msg_event.message_id == "1234567890.000001", (
             "message_id must equal the event ts so _run_agent can use it as "
             "the fallback thread anchor for progress messages"
         )
 
-        # Verify that the Slack send() method correctly threads a message
-        # when metadata contains thread_id equal to the original ts
+        # Verify that the Slack send() method can still thread a message when
+        # metadata explicitly contains the original ts as a delivery anchor.
         adapter._app.client.chat_postMessage = AsyncMock(return_value={"ts": "reply_ts"})
         result = await adapter.send(
             chat_id="D_DM",
@@ -2763,12 +2764,12 @@ class TestProgressMessageThread:
         call_kwargs = adapter._app.client.chat_postMessage.call_args[1]
         assert call_kwargs.get("thread_ts") == "1234567890.000001", (
             "send() must pass thread_ts when metadata has thread_id, "
-            "ensuring progress messages land in the thread"
+            "ensuring progress messages can land in the visible Slack thread"
         )
 
     @pytest.mark.asyncio
     async def test_dm_toplevel_shares_session_when_disabled(self, adapter):
-        """Opting out restores legacy single-session-per-DM-channel behavior."""
+        """Explicitly disabling preserves canonical single-session-per-DM behavior."""
         adapter.config.extra["dm_top_level_threads_as_sessions"] = False
 
         event = {
@@ -2792,6 +2793,32 @@ class TestProgressMessageThread:
         assert source.thread_id is None, (
             "source.thread_id must stay None when "
             "dm_top_level_threads_as_sessions is disabled"
+        )
+
+    @pytest.mark.asyncio
+    async def test_dm_toplevel_uses_message_ts_when_enabled(self, adapter):
+        """Opting in restores per-top-level-message Slack DM sessions."""
+        adapter.config.extra["dm_top_level_threads_as_sessions"] = True
+
+        event = {
+            "channel": "D_DM",
+            "channel_type": "im",
+            "user": "U_USER",
+            "text": "Hello bot",
+            "ts": "1234567890.000001",
+        }
+
+        captured_events = []
+        adapter.handle_message = AsyncMock(side_effect=lambda e: captured_events.append(e))
+
+        with patch.object(adapter, "_resolve_user_name", new=AsyncMock(return_value="testuser")):
+            await adapter._handle_slack_message(event)
+
+        assert len(captured_events) == 1
+        msg_event = captured_events[0]
+        assert msg_event.source.thread_id == "1234567890.000001", (
+            "source.thread_id should equal the message ts when "
+            "dm_top_level_threads_as_sessions is enabled"
         )
 
     @pytest.mark.asyncio

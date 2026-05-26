@@ -1089,6 +1089,32 @@ class TestSafeCopyDb:
         conn.close()
         assert rows == [("wal-test",)]
 
+    def test_captures_uncheckpointed_wal_frames(self, tmp_path):
+        """Safe DB copy must use SQLite backup, not a raw hot .db copy."""
+        from hermes_cli.backup import _safe_copy_db
+
+        src = tmp_path / "hot.db"
+        dst = tmp_path / "copy.db"
+        conn = sqlite3.connect(str(src))
+        conn.execute("PRAGMA journal_mode=WAL")
+        conn.execute("PRAGMA wal_autocheckpoint=0")
+        conn.execute("CREATE TABLE t (x INTEGER)")
+        conn.executemany("INSERT INTO t VALUES (?)", [(i,) for i in range(50)])
+        conn.commit()
+        assert Path(str(src) + "-wal").exists()
+        assert Path(str(src) + "-wal").stat().st_size > 0
+
+        result = _safe_copy_db(src, dst)
+        assert result is True
+
+        copied = sqlite3.connect(str(dst))
+        try:
+            assert copied.execute("PRAGMA integrity_check").fetchone()[0] == "ok"
+            assert copied.execute("SELECT count(*) FROM t").fetchone()[0] == 50
+        finally:
+            copied.close()
+            conn.close()
+
 
 # ---------------------------------------------------------------------------
 # Quick state snapshot tests
@@ -1139,6 +1165,42 @@ class TestQuickSnapshot:
         conn.close()
         assert len(rows) == 1
         assert rows[0] == ("s1", "hello world")
+
+    def test_snapshot_includes_default_and_named_kanban_dbs(self, hermes_home):
+        """Kanban boards are critical state and must be snapshotted safely."""
+        from hermes_cli.backup import create_quick_snapshot
+
+        default_db = hermes_home / "kanban.db"
+        named_dir = hermes_home / "kanban" / "boards" / "proj"
+        named_dir.mkdir(parents=True)
+        named_db = named_dir / "kanban.db"
+        for db_path, task_id in [(default_db, "t_default"), (named_db, "t_named")]:
+            conn = sqlite3.connect(str(db_path))
+            conn.execute("PRAGMA journal_mode=WAL")
+            conn.execute("CREATE TABLE tasks (id TEXT PRIMARY KEY, title TEXT)")
+            conn.execute("CREATE TABLE task_runs (id INTEGER PRIMARY KEY, task_id TEXT)")
+            conn.execute("INSERT INTO tasks VALUES (?, ?)", (task_id, "kept"))
+            conn.execute("INSERT INTO task_runs(task_id) VALUES (?)", (task_id,))
+            conn.commit()
+            conn.close()
+
+        snap_id = create_quick_snapshot(hermes_home=hermes_home)
+        snap_dir = hermes_home / "state-snapshots" / snap_id
+        with open(snap_dir / "manifest.json") as f:
+            manifest = json.load(f)["files"]
+        assert "kanban.db" in manifest
+        assert "kanban/boards/proj/kanban.db" in manifest
+        assert "kanban/boards/proj/kanban.db-wal" not in manifest
+        assert "kanban/boards/proj/kanban.db-shm" not in manifest
+
+        for rel, task_id in [("kanban.db", "t_default"), ("kanban/boards/proj/kanban.db", "t_named")]:
+            copied = sqlite3.connect(str(snap_dir / rel))
+            try:
+                assert copied.execute("PRAGMA integrity_check").fetchone()[0] == "ok"
+                assert copied.execute("SELECT id FROM tasks").fetchall() == [(task_id,)]
+                assert copied.execute("SELECT task_id FROM task_runs").fetchall() == [(task_id,)]
+            finally:
+                copied.close()
 
     def test_copies_nested_files(self, hermes_home):
         from hermes_cli.backup import create_quick_snapshot

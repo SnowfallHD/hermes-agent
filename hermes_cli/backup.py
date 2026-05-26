@@ -494,6 +494,8 @@ _QUICK_STATE_FILES = (
     "gateway_state.json",
     "channel_directory.json",
     "processes.json",
+    "kanban.db",                         # default Kanban board DB
+    "kanban/boards",                     # named Kanban board DBs + metadata
     # Pairing stores (generic + per-platform JSONs outside state.db)
     "pairing",                          # legacy location (gateway/pairing.py)
     "platforms/pairing",                # new location (gateway/pairing.py)
@@ -543,11 +545,23 @@ def create_quick_snapshot(
             for sub in src.rglob("*"):
                 if not sub.is_file():
                     continue
-                sub_rel = sub.relative_to(home).as_posix()
+                sub_rel_path = sub.relative_to(home)
+                sub_rel = sub_rel_path.as_posix()
+                if _should_exclude(sub_rel_path):
+                    continue
+                # Board archives can contain old malformed recovery candidates;
+                # quick snapshots are for live state, not recursive backups of
+                # prior board backups.
+                if rel == "kanban/boards" and "archive" in sub_rel_path.parts:
+                    continue
                 dst = snap_dir / sub_rel
                 dst.parent.mkdir(parents=True, exist_ok=True)
                 try:
-                    shutil.copy2(sub, dst)
+                    if sub.suffix == ".db":
+                        if not _safe_copy_db(sub, dst):
+                            continue
+                    else:
+                        shutil.copy2(sub, dst)
                     manifest[sub_rel] = dst.stat().st_size
                 except (OSError, PermissionError) as exc:
                     logger.warning("Could not snapshot %s: %s", sub_rel, exc)

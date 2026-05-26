@@ -16,6 +16,32 @@ class RecordingAdapter:
         self.sent.append({"chat_id": chat_id, "text": text, "metadata": metadata or {}})
 
 
+class RecordingSlackKanbanAdapter(RecordingAdapter):
+    def __init__(self):
+        super().__init__()
+        self.kanban_blocked = []
+
+    async def send_kanban_blocked(
+        self,
+        chat_id,
+        task_id,
+        title,
+        reason="",
+        board=None,
+        fallback_text="",
+        metadata=None,
+    ):
+        self.kanban_blocked.append({
+            "chat_id": chat_id,
+            "task_id": task_id,
+            "title": title,
+            "reason": reason,
+            "board": board,
+            "fallback_text": fallback_text,
+            "metadata": metadata or {},
+        })
+
+
 class DisconnectedAdapters(dict):
     """Expose a platform during collection, then simulate disconnect on get()."""
 
@@ -36,10 +62,10 @@ async def _run_one_notifier_tick(monkeypatch, runner):
     await runner._kanban_notifier_watcher(interval=1)
 
 
-def _make_runner(adapter):
+def _make_runner(adapter, platform=Platform.TELEGRAM):
     runner = GatewayRunner.__new__(GatewayRunner)
     runner._running = True
-    runner.adapters = {Platform.TELEGRAM: adapter}
+    runner.adapters = {platform: adapter}
     runner._kanban_sub_fail_counts = {}
     return runner
 
@@ -87,6 +113,44 @@ def test_kanban_notifier_dedupes_board_slugs_pointing_to_same_db(tmp_path, monke
     assert len(adapter.sent) == 1
     assert "Kanban" in adapter.sent[0]["text"]
     assert tid in adapter.sent[0]["text"]
+
+
+def test_kanban_notifier_uses_slack_native_blocked_delivery(tmp_path, monkeypatch):
+    home = tmp_path / ".hermes"
+    home.mkdir()
+    monkeypatch.delenv("HERMES_KANBAN_DB", raising=False)
+    monkeypatch.setenv("HERMES_HOME", str(home))
+    kb.init_db()
+    kb.create_board("projx")
+
+    conn = kb.connect(board="projx")
+    try:
+        tid = kb.create_task(conn, title="review me", assignee="worker")
+        kb.add_notify_sub(
+            conn,
+            task_id=tid,
+            platform="slack",
+            chat_id="C1",
+            thread_id="1111.0000",
+        )
+        kb.block_task(conn, tid, reason="review-required: tests pass")
+    finally:
+        conn.close()
+
+    adapter = RecordingSlackKanbanAdapter()
+    runner = _make_runner(adapter, platform=Platform.SLACK)
+
+    asyncio.run(_run_one_notifier_tick(monkeypatch, runner))
+
+    assert adapter.sent == []
+    assert len(adapter.kanban_blocked) == 1
+    delivery = adapter.kanban_blocked[0]
+    assert delivery["chat_id"] == "C1"
+    assert delivery["task_id"] == tid
+    assert delivery["board"] == "projx"
+    assert delivery["reason"] == "review-required: tests pass"
+    assert delivery["metadata"] == {"thread_id": "1111.0000"}
+    assert "!kanban --board projx unblock" in delivery["fallback_text"]
 
 
 def test_kanban_notifier_claim_prevents_second_watcher_send(tmp_path, monkeypatch):
