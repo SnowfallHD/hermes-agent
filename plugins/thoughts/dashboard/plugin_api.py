@@ -24,6 +24,8 @@ from fastapi import APIRouter, HTTPException, Query, WebSocket, WebSocketDisconn
 from hermes_cli import kanban_db, mind_events
 from hermes_constants import get_hermes_home
 
+from .material_action_reducer import material_action_reducer
+
 router = APIRouter()
 
 _MAX_THOUGHT_CHARS = 220
@@ -599,7 +601,8 @@ def _query_entries(
         mind_entries, mind_ledger = _profile_mind_entries(include_all=include_all_profiles, limit=limit)
         churn_entries = _churn_meta_entries(conn, board=active_board, limit=limit)
         action_entries = _session_action_reducer(include_all_profiles=include_all_profiles, limit=limit) if session_actions else []
-        entries = _merge_entries(entries, mind_entries, churn_entries, action_entries, limit=limit)
+        material_entries = material_action_reducer(include_all_profiles=include_all_profiles, limit=limit)
+        entries = _merge_entries(entries, mind_entries, churn_entries, action_entries, material_entries, limit=limit)
         latest = conn.execute("SELECT COALESCE(MAX(id), 0) FROM task_events").fetchone()[0]
         return entries, int(latest or 0), active_board, mind_ledger
     finally:
@@ -627,7 +630,7 @@ def get_thoughts(
         "latest_event_id": latest,
         "raw_chain_of_thought": False,
         "mind_ledger": mind_ledger,
-        "note": "Thoughts are safe one-line operational summaries from Mind Event ledgers, sparse consequential session actions, and Kanban activity, not raw model chain-of-thought.",
+        "note": "Thoughts are safe one-line operational summaries from Mind Event ledgers, sparse consequential session actions, material worker actions, and Kanban activity, not raw model chain-of-thought.",
     }
 
 

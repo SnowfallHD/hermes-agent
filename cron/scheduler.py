@@ -1210,6 +1210,53 @@ def run_job(job: dict) -> tuple[bool, str, str, Optional[str]]:
         return result
 
 
+def _emit_failure_cluster_event(error_message: str, job_id: str) -> None:
+    """Emit self_improvement event when same failure pattern repeats.
+
+    Tracks repeated cron job failures by semantic pattern and emits a
+    self_improvement/policy_candidate event when the same failure type
+    occurs multiple times within a threshold window.
+
+    This compresses 52 failed recoveries into one compressed event when
+    the same failure pattern repeats, avoiding feed churn.
+    """
+    try:
+        from cron.failure_cluster_registry import (
+            FailureClusterRegistry,
+            emit_policy_candidate_event,
+            get_registry_path,
+            load_registry,
+            save_registry,
+        )
+
+        # Load registry from the task workspace
+        registry_path = get_registry_path()
+        if not registry_path.parent.exists():
+            registry_path.parent.mkdir(parents=True, exist_ok=True)
+
+        registry = load_registry()
+
+        # Record the failure
+        cluster = registry.record_failure(
+            error_message=error_message,
+            failure_type="unknown",
+            provider="cron",
+            model=job_id,
+        )
+
+        # If threshold reached, emit self_improvement event
+        if cluster:
+            emit_policy_candidate_event(cluster, source="cron_failure_cluster")
+            # Clear the cluster after emitting to avoid duplicate events
+            registry.clear_cluster(cluster.pattern_hash)
+
+        # Save registry state
+        save_registry(registry)
+    except Exception:
+        # Best-effort: don't crash cron if registry fails
+        logger.debug("failure_cluster_registry error", exc_info=True)
+
+
 def _append_cron_mind_event(job: dict, result: tuple[bool, str, str, Optional[str]]) -> None:
     """Best-effort bridge from completed cron runs into the Mind Event ledger."""
 
@@ -1243,18 +1290,21 @@ def _append_cron_mind_event(job: dict, result: tuple[bool, str, str, Optional[st
                 why_it_matters = "Cron completion may update the operating picture even when no direct user response is needed."
                 next_best_action = "watch"
             suffix = f" Result: {snippet}" if snippet else ""
-            summary = f"Cron job “{job_name}” completed and may affect the operating picture.{suffix}"
+            summary = f'Cron job "{job_name}" completed and may affect the operating picture.{suffix}'
             urgency = "daily_brief"
             autonomy_quality = "good_autonomous_action"
         else:
             kind = "cron_failure"
             event_type = "risk_signal"
             category = "decision"
-            summary = f"Cron job “{job_name}” failed; I should inspect the failure before trusting this loop."
+            summary = f'Cron job "{job_name}" failed; I should inspect the failure before trusting this loop.'
             why_it_matters = "A broken scheduled loop can create blind spots in Hermes monitoring or revenue/autonomy routines."
             urgency = "needs_review"
             autonomy_quality = "failed_recovery_needed"
             next_best_action = "retry"
+
+            # Emit failure clustering self-improvement event when same pattern repeats
+            _emit_failure_cluster_event(error or "Unknown cron job failure", job_id)
         mind_events.append_event(
             source="cron",
             kind=kind,
