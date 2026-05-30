@@ -1,0 +1,14 @@
+{
+  "name": "thoughts",
+  "label": "Thoughts",
+  "description": "Unified Mind/Event feed for Hermes — clear one-line summaries of observations, decisions, routes, crons, metacognition, and Kanban activity",
+  "icon": "Sparkles",
+  "version": "1.0.0",
+  "tab": {
+    "path": "/thoughts",
+    "position": "after:kanban"
+  },
+  "entry": "dist/index.js",
+  "css": "dist/style.css",
+  "api": "plugin_api.py"
+}

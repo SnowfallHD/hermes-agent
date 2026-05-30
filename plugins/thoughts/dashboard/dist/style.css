@@ -1,0 +1,194 @@
+.hermes-thoughts-page {
+  display: flex;
+  flex-direction: column;
+  gap: 1rem;
+  padding: 1rem;
+  min-height: 100%;
+}
+
+.hermes-thoughts-header {
+  display: flex;
+  align-items: flex-start;
+  justify-content: space-between;
+  gap: 1rem;
+}
+
+.hermes-thoughts-title {
+  font-size: 1.45rem;
+  font-weight: 700;
+  letter-spacing: -0.02em;
+}
+
+.hermes-thoughts-subtitle,
+.hermes-thoughts-board {
+  color: hsl(var(--muted-foreground));
+  font-size: 0.85rem;
+  margin-top: 0.2rem;
+  max-width: 52rem;
+}
+
+.hermes-thoughts-board {
+  font-size: 0.75rem;
+  letter-spacing: 0.08em;
+  text-transform: uppercase;
+}
+
+.hermes-thoughts-actions,
+.hermes-thoughts-filters {
+  display: flex;
+  align-items: center;
+  gap: 0.5rem;
+  flex-wrap: wrap;
+}
+
+.hermes-thoughts-actions {
+  justify-content: flex-end;
+}
+
+.hermes-thoughts-filters {
+  justify-content: flex-start;
+  width: fit-content;
+  max-width: 100%;
+  border: 1px solid color-mix(in srgb, var(--midground) 15%, transparent);
+  background: color-mix(in srgb, var(--background) 30%, transparent);
+  gap: 0;
+}
+
+.hermes-thought-filter {
+  height: 1.75rem;
+  padding: 0 0.625rem;
+  border: 0;
+  border-right: 1px solid color-mix(in srgb, var(--midground) 15%, transparent);
+  background: transparent;
+  color: var(--color-text-secondary);
+  cursor: pointer;
+  white-space: nowrap;
+  font-size: 0.75rem;
+  letter-spacing: 0.1em;
+  text-transform: uppercase;
+  transition: color 120ms ease, background 120ms ease;
+}
+
+.hermes-thought-filter:last-child {
+  border-right: 0;
+}
+
+.hermes-thought-filter:hover {
+  background: color-mix(in srgb, var(--midground) 10%, transparent);
+  color: var(--midground);
+}
+
+.hermes-thought-filter--active,
+.hermes-thought-filter--active:hover {
+  background: var(--midground);
+  color: var(--background-base);
+}
+
+.hermes-thoughts-now {
+  border-color: color-mix(in srgb, hsl(var(--primary)) 34%, hsl(var(--border)));
+  background: linear-gradient(135deg,
+    color-mix(in srgb, hsl(var(--primary)) 9%, transparent),
+    color-mix(in srgb, hsl(var(--background)) 96%, hsl(var(--primary)))
+  );
+}
+
+.hermes-thoughts-now-content {
+  padding: 1rem;
+}
+
+.hermes-thoughts-now-label {
+  color: hsl(var(--muted-foreground));
+  font-size: 0.75rem;
+  font-weight: 600;
+  text-transform: uppercase;
+  letter-spacing: 0.08em;
+  margin-bottom: 0.35rem;
+}
+
+.hermes-thoughts-now-text {
+  font-size: 1rem;
+  line-height: 1.45;
+}
+
+.hermes-thoughts-now-meta,
+.hermes-thought-meta,
+.hermes-thought-why,
+.hermes-thought-next {
+  color: hsl(var(--muted-foreground));
+  font-size: 0.75rem;
+  margin-top: 0.35rem;
+}
+
+.hermes-thoughts-error {
+  color: hsl(var(--destructive));
+  border: 1px solid color-mix(in srgb, hsl(var(--destructive)) 35%, hsl(var(--border)));
+  background: color-mix(in srgb, hsl(var(--destructive)) 8%, transparent);
+  border-radius: 0.7rem;
+  padding: 0.75rem 1rem;
+  font-size: 0.85rem;
+}
+
+.hermes-thoughts-muted {
+  color: hsl(var(--muted-foreground));
+  font-size: 0.875rem;
+}
+
+.hermes-thoughts-list {
+  display: flex;
+  flex-direction: column;
+  gap: 0.5rem;
+}
+
+.hermes-thought-row {
+  display: grid;
+  grid-template-columns: 0.8rem 1fr;
+  gap: 0.65rem;
+  align-items: flex-start;
+  border: 1px solid hsl(var(--border));
+  border-radius: 0.75rem;
+  padding: 0.8rem 0.95rem;
+  background: color-mix(in srgb, hsl(var(--card)) 92%, transparent);
+}
+
+.hermes-thought-dot {
+  width: 0.55rem;
+  height: 0.55rem;
+  border-radius: 999px;
+  margin-top: 0.35rem;
+  background: hsl(var(--primary));
+  box-shadow: 0 0 0 3px color-mix(in srgb, hsl(var(--primary)) 16%, transparent);
+}
+
+.hermes-thought-row--blocked .hermes-thought-dot,
+.hermes-thought-row--spawn_auto_blocked .hermes-thought-dot,
+.hermes-thought-row--approval_gate .hermes-thought-dot {
+  background: hsl(var(--destructive));
+  box-shadow: 0 0 0 3px color-mix(in srgb, hsl(var(--destructive)) 16%, transparent);
+}
+
+.hermes-thought-row--completed .hermes-thought-dot,
+.hermes-thought-row--done .hermes-thought-dot,
+.hermes-thought-row--decision .hermes-thought-dot {
+  background: #22c55e;
+  box-shadow: 0 0 0 3px rgb(34 197 94 / 0.16);
+}
+
+.hermes-thought-row--claimed .hermes-thought-dot,
+.hermes-thought-row--spawned .hermes-thought-dot,
+.hermes-thought-row--heartbeat .hermes-thought-dot,
+.hermes-thought-row--uncertainty .hermes-thought-dot,
+.hermes-thought-row--route .hermes-thought-dot {
+  background: #f59e0b;
+  box-shadow: 0 0 0 3px rgb(245 158 11 / 0.16);
+}
+
+.hermes-thought-row--revenue_signal .hermes-thought-dot,
+.hermes-thought-row--self_improvement_signal .hermes-thought-dot {
+  background: #8b5cf6;
+  box-shadow: 0 0 0 3px rgb(139 92 246 / 0.16);
+}
+
+.hermes-thought-line {
+  font-size: 0.92rem;
+  line-height: 1.42;
+}

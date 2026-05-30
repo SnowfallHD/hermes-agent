@@ -210,15 +210,15 @@ TOOLSETS = {
         "includes": []
     },
     
-    "memory": {
-        "description": "Persistent memory across sessions (personal notes + user profile)",
-        "tools": ["memory"],
+    "mind_events": {
+        "description": "Explicit safe Mind/Event feed telemetry (not raw chain-of-thought)",
+        "tools": ["record_mind_event"],
         "includes": []
     },
 
-    "context_engine": {
-        "description": "Runtime tools exposed by the active context engine",
-        "tools": [],
+    "memory": {
+        "description": "Persistent memory across sessions (personal notes + user profile)",
+        "tools": ["memory"],
         "includes": []
     },
     

@@ -45,3 +45,12 @@ def _ensure_utf8():
 
 
 _ensure_utf8()
+
+# ── Local imports (no network, no heavy deps) ──────────────────────
+
+__all__ = ["__version__", "__release_date__"]
+
+try:
+    from hermes_cli import mind_events  # noqa: F401
+except ImportError:
+    pass  # mind_events toolset disabled or not installed

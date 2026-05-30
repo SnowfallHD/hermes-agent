@@ -1205,7 +1205,75 @@ def run_job(job: dict) -> tuple[bool, str, str, Optional[str]]:
     """Execute a single cron job, applying any per-job profile override."""
     job_id = job["id"]
     with _job_profile_context(job_id, job.get("profile")):
-        return _run_job_impl(job)
+        result = _run_job_impl(job)
+        _append_cron_mind_event(job, result)
+        return result
+
+
+def _append_cron_mind_event(job: dict, result: tuple[bool, str, str, Optional[str]]) -> None:
+    """Best-effort bridge from completed cron runs into the Mind Event ledger."""
+
+    try:
+        from hermes_cli import mind_events
+
+        success, _output, final_response, error = result
+        job_id = str(job.get("id") or "cron")
+        job_name = str(job.get("name") or job.get("prompt") or job_id)
+        if success and final_response == SILENT_MARKER:
+            # A successful silent cron tick is intentionally the absence of a
+            # cognition or operator-action signal. Recording every quiet success
+            # as a Thought turns the feed into mechanical heartbeat churn and can
+            # drown out decisions, uncertainty, revenue signals, and approval
+            # boundaries. Failures, even with a silent final response marker,
+            # must remain observable below.
+            return
+        elif success:
+            snippet = mind_events.clean_text(final_response, limit=180)
+            lowered = f"{job_name} {final_response}".lower()
+            if any(term in lowered for term in ("revenue", "$50k", "mrr", "paid", "buyer", "customer", "opportunity")):
+                kind = "revenue_signal"
+                event_type = "revenue_signal"
+                category = "revenue"
+                why_it_matters = "This cron result appears connected to Kryden revenue discovery or the $50k MRR loop."
+                next_best_action = "create_task"
+            else:
+                kind = "cron_result"
+                event_type = "cron_result"
+                category = "cron"
+                why_it_matters = "Cron completion may update the operating picture even when no direct user response is needed."
+                next_best_action = "watch"
+            suffix = f" Result: {snippet}" if snippet else ""
+            summary = f"Cron job “{job_name}” completed and may affect the operating picture.{suffix}"
+            urgency = "daily_brief"
+            autonomy_quality = "good_autonomous_action"
+        else:
+            kind = "cron_failure"
+            event_type = "risk_signal"
+            category = "decision"
+            summary = f"Cron job “{job_name}” failed; I should inspect the failure before trusting this loop."
+            why_it_matters = "A broken scheduled loop can create blind spots in Hermes monitoring or revenue/autonomy routines."
+            urgency = "needs_review"
+            autonomy_quality = "failed_recovery_needed"
+            next_best_action = "retry"
+        mind_events.append_event(
+            source="cron",
+            kind=kind,
+            event_type=event_type,
+            category=category,
+            summary=summary,
+            rationale="Cron completion emitted as explicit operational telemetry, not raw chain-of-thought.",
+            why_it_matters=why_it_matters,
+            evidence_refs=[f"cron:{job_id}"],
+            priority="self_improvement" if not success else category,
+            confidence=1.0,
+            confidence_label="high",
+            urgency=urgency,
+            autonomy_quality=autonomy_quality,
+            next_best_action=next_best_action,
+            metadata={"job_id": job_id, "schedule": job.get("schedule_display") or job.get("schedule"), "error": error or ""},
+        )
+    except Exception:
+        return
 
 
 def _run_job_impl(job: dict) -> tuple[bool, str, str, Optional[str]]:
