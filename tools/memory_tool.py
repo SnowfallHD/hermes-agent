@@ -329,7 +329,19 @@ class MemoryStore:
                 current = self._char_count(target)
                 return {
                     "success": False,
+                    "error_type": "memory_limit_exceeded",
+                    "target": target,
+                    "current_chars": current,
+                    "limit_chars": limit,
+                    "required_next_action": "replace",
+                    "replace_requires": ["content"],
+                    "instruction": "Do not retry add. Consolidate existing memory and call replace with full replacement content.",
                     "error": (
+                        f"Memory at {current:,}/{limit:,} chars. "
+                        f"Adding this entry ({len(content)} chars) would exceed the limit. "
+                        f"Replace or remove existing entries first."
+                    ),
+                    "error_msg": (
                         f"Memory at {current:,}/{limit:,} chars. "
                         f"Adding this entry ({len(content)} chars) would exceed the limit. "
                         f"Replace or remove existing entries first."
@@ -351,7 +363,14 @@ class MemoryStore:
         if not old_text:
             return {"success": False, "error": "old_text cannot be empty."}
         if not new_content:
-            return {"success": False, "error": "new_content cannot be empty. Use 'remove' to delete entries."}
+            return {
+                "success": False,
+                "error_type": "invalid_replace_call",
+                "required_next_action": "provide_content",
+                "instruction": "replace requires content. Stop and provide proposed replacement text to the user.",
+                "replace_requires": ["content"],
+                "error": "new_content cannot be empty. Use 'remove' to delete entries.",
+            }
 
         # Scan replacement content for injection/exfiltration
         scan_error = _scan_memory_content(new_content)
@@ -392,6 +411,13 @@ class MemoryStore:
             if new_total > limit:
                 return {
                     "success": False,
+                    "error_type": "memory_limit_exceeded",
+                    "target": target,
+                    "current_chars": new_total,
+                    "limit_chars": limit,
+                    "required_next_action": "replace",
+                    "replace_requires": ["content"],
+                    "instruction": "Do not retry replace with same character limit. Consolidate existing memory and provide shorter replacement content.",
                     "error": (
                         f"Replacement would put memory at {new_total:,}/{limit:,} chars. "
                         f"Shorten the new content or remove other entries first."
@@ -626,7 +652,14 @@ def memory_tool(
         if not old_text:
             return tool_error("old_text is required for 'replace' action.", success=False)
         if not content:
-            return tool_error("content is required for 'replace' action.", success=False)
+            return json.dumps({
+                "success": False,
+                "error_type": "invalid_replace_call",
+                "required_next_action": "provide_content",
+                "replace_requires": ["content"],
+                "instruction": "replace requires content. Stop and provide proposed replacement text to the user.",
+                "error": "content is required for 'replace' action.",
+            }, ensure_ascii=False)
         result = store.replace(target, old_text, content)
 
     elif action == "remove":
