@@ -24,7 +24,18 @@ from fastapi import APIRouter, HTTPException, Query, WebSocket, WebSocketDisconn
 from hermes_cli import kanban_db, mind_events
 from hermes_constants import get_hermes_home
 
-from .material_action_reducer import material_action_reducer
+try:
+    from .material_action_reducer import material_action_reducer
+except ImportError:  # tests load this file directly via importlib spec
+    import importlib.util
+
+    _material_path = Path(__file__).with_name("material_action_reducer.py")
+    _material_spec = importlib.util.spec_from_file_location("thoughts_material_action_reducer", _material_path)
+    if _material_spec is None or _material_spec.loader is None:
+        raise
+    _material_mod = importlib.util.module_from_spec(_material_spec)
+    _material_spec.loader.exec_module(_material_mod)
+    material_action_reducer = _material_mod.material_action_reducer
 
 router = APIRouter()
 
@@ -334,6 +345,152 @@ _ROUTINE_SESSION_TOOLS = {
 _EDIT_TOOLS = {"patch", "write_file"}
 _TEST_COMMAND_RE = re.compile(r"\b(pytest|npm test|pnpm test|yarn test|go test|cargo test|swift test|python -m pytest)\b", re.I)
 _ERROR_RE = re.compile(r"\b(error|failed|traceback|exception|permission denied|timed out|exit_code\D*[1-9])\b", re.I)
+_EVENT_TYPE_CATEGORY_CONTRACT = {
+    "kanban_motion": "kanban",
+    "cron_silent": "cron",
+    "cron_result": "cron",
+    "cron_failure": "cron",
+    "self_improvement_signal": "self_improvement",
+    "policy_candidate": "self_improvement",
+    "opportunity_signal": "revenue",
+    "revenue_signal": "revenue",
+    "uncertainty_signal": "uncertainty",
+    "decision_signal": "decision",
+    "approval_boundary": "decision",
+    "risk_signal": "decision",
+    "user_context_update": "mind",
+    "mind_signal": "mind",
+}
+_ACTIVE_NEXT_BEST_ACTIONS = {
+    "verify",
+    "retry",
+    "escalate",
+    "create_task",
+    "draft_for_review",
+    "request_permission",
+}
+_FOLLOWTHROUGH_METADATA_KEYS = {
+    "created_task_id",
+    "existing_task_id",
+    "duplicate_task_id",
+    "related_task_id",
+    "verification_ref",
+    "verified_by",
+    "verified_at",
+    "outcome_ref",
+    "outcome_event_id",
+    "route_ref",
+    "approval_request_id",
+    "approval_message_id",
+}
+
+
+def _clean_ref(value: Any) -> str:
+    return _clean_text(value, limit=180)
+
+
+def _entry_refs(entry: dict[str, Any]) -> list[str]:
+    refs: list[str] = []
+    seen: set[str] = set()
+    for ref in entry.get("evidence_refs") or []:
+        text = _clean_ref(ref)
+        if text and text not in seen:
+            seen.add(text)
+            refs.append(text)
+    return refs
+
+
+def _append_ref(refs: list[str], ref: Any) -> None:
+    text = _clean_ref(ref)
+    if text and text not in refs:
+        refs.append(text)
+
+
+def _expected_category_for(event_type: Any) -> str | None:
+    return _EVENT_TYPE_CATEGORY_CONTRACT.get(_clean_text(event_type, limit=80))
+
+
+def _metadata(entry: dict[str, Any]) -> dict[str, Any]:
+    raw = entry.get("metadata")
+    return raw if isinstance(raw, dict) else {}
+
+
+def _has_followthrough_link(entry: dict[str, Any]) -> bool:
+    metadata = _metadata(entry)
+    if any(metadata.get(key) for key in _FOLLOWTHROUGH_METADATA_KEYS):
+        return True
+    refs = _entry_refs(entry)
+    action = _clean_text(entry.get("next_best_action"), limit=40)
+    if action == "verify":
+        return any(ref.startswith(("verification:", "outcome:", "kanban-event:completed", "task-run:completed")) for ref in refs)
+    if action == "request_permission":
+        return any(ref.startswith(("approval:", "message:", "slack:", "telegram:")) for ref in refs)
+    return bool(entry.get("related_task_id") or entry.get("task_id") or entry.get("related_session_id"))
+
+
+def _validate_cognition_entry(entry: dict[str, Any]) -> dict[str, Any]:
+    """Validate and annotate explicit cognition claims for the dashboard feed.
+
+    This is a read-time output contract check, not hidden reasoning. It corrects
+    category/event_type emission mismatches for filtering, adds sparse evidence
+    refs where the reducer has observable source IDs, and labels whether a gap is
+    producer-output hygiene or a real follow-through/action-quality issue.
+    """
+    entry = dict(entry)
+    original_category = _clean_text(entry.get("category"), limit=80)
+    event_type = _clean_text(entry.get("event_type"), limit=80)
+    expected_category = _expected_category_for(event_type)
+    findings: list[str] = []
+    gap_type = "none"
+
+    if expected_category and original_category != expected_category:
+        findings.append("category_contract_mismatch")
+        entry["category"] = expected_category
+        gap_type = "output_emission_gap"
+
+    refs = _entry_refs(entry)
+    if entry.get("source") == "kanban" or str(entry.get("id", "")).startswith("kanban:"):
+        _append_ref(refs, f"kanban-event:{entry.get('event_seq')}")
+        if entry.get("task_id"):
+            _append_ref(refs, f"kanban-task:{entry.get('task_id')}")
+    elif str(entry.get("id", "")).startswith("churn:"):
+        _append_ref(refs, f"kanban-event:{entry.get('event_seq')}")
+        if entry.get("task_id"):
+            _append_ref(refs, f"kanban-task:{entry.get('task_id')}")
+    elif str(entry.get("id", "")).startswith("mind:"):
+        _append_ref(refs, f"mind-line:{entry.get('event_seq')}")
+
+    if not refs:
+        findings.append("missing_evidence_refs")
+        evidence_status = "missing"
+    else:
+        evidence_status = "present"
+    entry["evidence_refs"] = refs
+
+    action = _clean_text(entry.get("next_best_action"), limit=40)
+    if action in _ACTIVE_NEXT_BEST_ACTIONS:
+        followthrough_status = "linked" if _has_followthrough_link(entry) else "missing_followthrough_link"
+        if followthrough_status == "missing_followthrough_link":
+            findings.append("missing_followthrough_link")
+            if gap_type == "none":
+                gap_type = "action_quality_gap"
+    else:
+        followthrough_status = "not_required"
+
+    entry["cognition_validation"] = {
+        "claim_contract": "valid" if "category_contract_mismatch" not in findings else "corrected",
+        "expected_category": expected_category or original_category,
+        "original_category": original_category,
+        "evidence_status": evidence_status,
+        "followthrough_status": followthrough_status,
+        "gap_type": gap_type,
+        "findings": findings,
+    }
+    return entry
+
+
+def _validate_cognition_entries(entries: list[dict[str, Any]]) -> list[dict[str, Any]]:
+    return [_validate_cognition_entry(entry) for entry in entries]
 
 
 def _decode_tool_calls(raw: Any) -> list[dict[str, Any]]:
@@ -603,6 +760,7 @@ def _query_entries(
         action_entries = _session_action_reducer(include_all_profiles=include_all_profiles, limit=limit) if session_actions else []
         material_entries = material_action_reducer(include_all_profiles=include_all_profiles, limit=limit)
         entries = _merge_entries(entries, mind_entries, churn_entries, action_entries, material_entries, limit=limit)
+        entries = _validate_cognition_entries(entries)
         latest = conn.execute("SELECT COALESCE(MAX(id), 0) FROM task_events").fetchone()[0]
         return entries, int(latest or 0), active_board, mind_ledger
     finally:

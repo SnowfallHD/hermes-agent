@@ -331,6 +331,87 @@ def test_thoughts_endpoint_returns_all_top_level_mind_event_categories_with_qual
         assert entry["raw_chain_of_thought"] is False
 
 
+def test_thoughts_endpoint_corrects_claim_contract_mismatches_as_emission_gaps(client, kanban_home):
+    ledger = kanban_home / "state" / "mind" / "events.jsonl"
+    ledger.parent.mkdir(parents=True, exist_ok=True)
+    ledger.write_text(
+        json.dumps(
+            {
+                "created_at": 1780200000.0,
+                "source": "auditor",
+                "kind": "synthesis",
+                "event_type": "revenue_signal",
+                "category": "cron",
+                "summary": "Synthesis claims a revenue signal but was emitted with the wrong category.",
+                "why_it_matters": "Contract validation should separate producer labeling bugs from real cognition quality.",
+                "evidence_refs": ["audit:claim-mismatch"],
+                "confidence_label": "high",
+                "urgency": "daily_brief",
+                "autonomy_quality": "good_autonomous_action",
+                "next_best_action": "create_task",
+                "metadata": {"created_task_id": "t_followup"},
+            },
+            sort_keys=True,
+        )
+        + "\n"
+    )
+
+    response = client.get("/api/plugins/thoughts/thoughts?limit=20")
+    assert response.status_code == 200, response.text
+    entry = next(entry for entry in response.json()["entries"] if entry["source"] == "auditor")
+
+    assert entry["event_type"] == "revenue_signal"
+    assert entry["category"] == "revenue"
+    assert entry["cognition_validation"]["gap_type"] == "output_emission_gap"
+    assert entry["cognition_validation"]["original_category"] == "cron"
+    assert "category_contract_mismatch" in entry["cognition_validation"]["findings"]
+
+
+def test_thoughts_endpoint_adds_validation_evidence_and_followthrough_status(client):
+    conn = kb.connect()
+    try:
+        task_id = kb.create_task(
+            conn,
+            title="Review evidence refs",
+            assignee="ops",
+            created_by="test",
+            initial_status="running",
+        )
+        kb._append_event(conn, task_id, "completed", {"summary": "done"})
+    finally:
+        conn.close()
+
+    response = client.get("/api/plugins/thoughts/thoughts?limit=20")
+    assert response.status_code == 200, response.text
+    entries = response.json()["entries"]
+
+    kanban_entry = next(entry for entry in entries if entry.get("task_id") == task_id and entry["kind"] == "completed")
+    assert f"kanban-task:{task_id}" in kanban_entry["evidence_refs"]
+    assert any(ref.startswith("kanban-event:") for ref in kanban_entry["evidence_refs"])
+    assert kanban_entry["cognition_validation"]["evidence_status"] == "present"
+    assert kanban_entry["cognition_validation"]["claim_contract"] == "valid"
+
+    mind_events.append_event(
+        source="agent",
+        kind="uncertainty_signal",
+        event_type="uncertainty_signal",
+        category="uncertainty",
+        summary="Need verify later evidence before trusting this route.",
+        rationale="Explicit event summary, not hidden chain-of-thought.",
+        why_it_matters="The validation layer should expose when verification is requested but not yet linked.",
+        evidence_refs=["session:uncertain"],
+        confidence_label="high",
+        urgency="needs_review",
+        autonomy_quality="unclear",
+        next_best_action="verify",
+    )
+    response = client.get("/api/plugins/thoughts/thoughts?limit=20")
+    assert response.status_code == 200, response.text
+    uncertain = next(entry for entry in response.json()["entries"] if entry["source"] == "agent" and "Need verify" in entry["thought"])
+    assert uncertain["cognition_validation"]["followthrough_status"] == "missing_followthrough_link"
+    assert uncertain["cognition_validation"]["gap_type"] == "action_quality_gap"
+
+
 def test_thoughts_endpoint_respects_board_param(client):
     kb.create_board("revenue-test", name="Revenue Test")
     default_conn = kb.connect()

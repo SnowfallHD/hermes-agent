@@ -10,6 +10,7 @@ Usage:
 """
 
 import asyncio
+import hashlib
 import hmac
 import importlib.util
 import json
@@ -21,6 +22,7 @@ import subprocess
 import sys
 import threading
 import time
+import types
 import urllib.parse
 import urllib.request
 from pathlib import Path
@@ -4797,7 +4799,14 @@ def _mount_plugin_api_routes():
             _log.warning("Plugin %s declares api=%s but file not found", plugin["name"], api_file_name)
             continue
         try:
-            module_name = f"hermes_dashboard_plugin_{plugin['name']}"
+            safe_name = "".join(ch if ch.isalnum() else "_" for ch in str(plugin["name"]))
+            path_hash = hashlib.sha1(str(resolved_api).encode("utf-8")).hexdigest()[:12]
+            package_name = f"hermes_dashboard_plugin_{safe_name}_{path_hash}"
+            module_name = f"{package_name}.plugin_api"
+            package = types.ModuleType(package_name)
+            package.__path__ = [str(dashboard_dir)]  # type: ignore[attr-defined]
+            package.__package__ = package_name
+            sys.modules[package_name] = package
             spec = importlib.util.spec_from_file_location(module_name, api_path)
             if spec is None or spec.loader is None:
                 continue
@@ -4807,16 +4816,21 @@ def _mount_plugin_api_routes():
             # that uses `from __future__ import annotations`). Without this,
             # TypeAdapter lazy-build fails at first request with
             # "is not fully defined" because the module namespace isn't
-            # reachable by name for string-annotation resolution.
+            # reachable by name for string-annotation resolution.  The parent
+            # package above gives plugin modules a real package context so
+            # relative imports like `from .helper import X` work.
             sys.modules[module_name] = mod
             try:
                 spec.loader.exec_module(mod)
             except Exception:
                 sys.modules.pop(module_name, None)
+                sys.modules.pop(package_name, None)
                 raise
             router = getattr(mod, "router", None)
             if router is None:
                 _log.warning("Plugin %s api file has no 'router' attribute", plugin["name"])
+                sys.modules.pop(module_name, None)
+                sys.modules.pop(package_name, None)
                 continue
             app.include_router(router, prefix=f"/api/plugins/{plugin['name']}")
             _log.info("Mounted plugin API routes: /api/plugins/%s/", plugin["name"])
