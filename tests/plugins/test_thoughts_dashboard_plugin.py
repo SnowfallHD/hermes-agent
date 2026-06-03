@@ -35,6 +35,69 @@ def _load_plugin_router():
     return _load_plugin_module().router
 
 
+def test_action_template_compressor_aggregates_low_info_entries_but_preserves_high_signal():
+    mod = _load_plugin_module()
+    entries = [
+        {
+            "id": f"kanban:{i}",
+            "event_seq": i,
+            "created_at": 1000 + i,
+            "source": "kanban",
+            "kind": "completed",
+            "event_type": "kanban_motion",
+            "category": "kanban",
+            "summary": f"worker finished task t_{i:08x}",
+            "thought": f"worker finished task t_{i:08x}",
+            "evidence_refs": [f"kanban-event:{i}"],
+            "next_best_action": "watch",
+            "autonomy_quality": "good_autonomous_action",
+        }
+        for i in range(4)
+    ]
+    entries.extend([
+        {
+            "id": "kanban:review",
+            "event_seq": 20,
+            "created_at": 2000,
+            "source": "kanban",
+            "kind": "blocked",
+            "event_type": "decision_signal",
+            "category": "decision",
+            "summary": "review-required: local code change needs eyes",
+            "thought": "review-required: local code change needs eyes",
+            "evidence_refs": ["kanban-event:20"],
+            "next_best_action": "escalate",
+        },
+        {
+            "id": "mind:revenue",
+            "event_seq": 21,
+            "created_at": 2001,
+            "source": "cron",
+            "kind": "revenue_signal",
+            "event_type": "revenue_signal",
+            "category": "revenue",
+            "summary": "Revenue signal for $50k MRR.",
+            "thought": "Revenue signal for $50k MRR.",
+            "evidence_refs": ["market:1"],
+            "next_best_action": "create_task",
+        },
+    ])
+
+    compressed, meta = mod._compress_repeated_low_information_actions(entries, min_count=3)
+
+    assert len(meta) == 1
+    aggregate = meta[0]
+    assert aggregate["counts"]["total"] == 4
+    assert aggregate["window"]["seconds"] == 3
+    assert aggregate["representative_evidence_refs"] == ["kanban-event:0", "kanban-event:1", "kanban-event:2", "kanban-event:3"]
+    assert aggregate["why_it_matters"]
+    assert aggregate["autonomy_quality"] == "compressed_low_information_repeats"
+    assert aggregate["next_best_action"] == "watch"
+    assert not any(entry.get("id") == "kanban:0" for entry in compressed)
+    assert any(entry.get("id") == "kanban:review" for entry in compressed)
+    assert any(entry.get("id") == "mind:revenue" for entry in compressed)
+
+
 @pytest.fixture
 def kanban_home(tmp_path, monkeypatch):
     home = tmp_path / ".hermes"

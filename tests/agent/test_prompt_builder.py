@@ -27,6 +27,7 @@ from agent.prompt_builder import (
     SESSION_SEARCH_GUIDANCE,
     PLATFORM_HINTS,
     WSL_ENVIRONMENT_HINT,
+    KANBAN_GUIDANCE,
 )
 from hermes_cli.nous_subscription import NousFeatureState, NousSubscriptionFeatures
 
@@ -47,6 +48,14 @@ class TestGuidanceConstants:
     def test_session_search_guidance_is_simple_cross_session_recall(self):
         assert "relevant cross-session context exists" in SESSION_SEARCH_GUIDANCE
         assert "recent turns of the current session" not in SESSION_SEARCH_GUIDANCE
+
+    def test_kanban_guidance_does_not_make_local_code_review_a_blocker(self):
+        assert "Review is not a synonym for human approval" in KANBAN_GUIDANCE
+        assert "local/internal/reversible code change" in KANBAN_GUIDANCE
+        assert "complete the task with structured metadata" in KANBAN_GUIDANCE
+        assert "most coding tasks" not in KANBAN_GUIDANCE
+        assert "Do not block solely because the artifact is code" in KANBAN_GUIDANCE
+        assert "external/account/credential/production-client-core/push/merge/restart/spend/reputation" in KANBAN_GUIDANCE
 
 
 # =========================================================================

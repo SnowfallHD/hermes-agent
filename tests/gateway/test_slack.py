@@ -472,6 +472,64 @@ class TestSlackProxyBehavior:
 
 
 # ---------------------------------------------------------------------------
+# TestSendAutoParentThread
+# ---------------------------------------------------------------------------
+
+class TestSendAutoParentThread:
+    @pytest.mark.asyncio
+    async def test_long_top_level_reply_posts_parent_blocks_then_thread_detail(self, adapter):
+        adapter._app.client.chat_postMessage = AsyncMock(side_effect=[
+            {"ts": "111.000001"},
+            {"ts": "111.000002"},
+        ])
+
+        result = await adapter.send(
+            "C123",
+            "🚀 **Launch brief**\n\n"
+            "**Summary:** compact parent, detailed thread.\n"
+            "1. First parent bullet.\n"
+            "2. Second parent bullet.\n"
+            "\n"
+            "Root cause:\n"
+            "The detailed payload is intentionally long enough and structured enough "
+            "to be sent as a threaded reply rather than a channel dump.\n"
+            "Evidence:\n"
+            "Slack thread replies keep the channel readable while preserving detail.",
+        )
+
+        assert result.success is True
+        assert result.message_id == "111.000001"
+        calls = adapter._app.client.chat_postMessage.await_args_list
+        assert len(calls) == 2
+        parent_kwargs = calls[0].kwargs
+        detail_kwargs = calls[1].kwargs
+        assert parent_kwargs["channel"] == "C123"
+        assert parent_kwargs["blocks"][0]["type"] == "header"
+        assert parent_kwargs["blocks"][0]["text"]["text"] == "🚀 Launch brief"
+        assert "thread_ts" not in parent_kwargs
+        assert detail_kwargs["channel"] == "C123"
+        assert detail_kwargs["thread_ts"] == "111.000001"
+        assert "Root cause:" in detail_kwargs["text"]
+
+    @pytest.mark.asyncio
+    async def test_existing_thread_reply_does_not_create_nested_auto_thread(self, adapter):
+        adapter._app.client.chat_postMessage = AsyncMock(return_value={"ts": "222.000002"})
+
+        result = await adapter.send(
+            "C123",
+            "🚀 **Launch brief**\n\nRoot cause:\nLong detail stays in the existing thread.",
+            reply_to="222.000001",
+            metadata={"thread_id": "222.000001"},
+        )
+
+        assert result.success is True
+        adapter._app.client.chat_postMessage.assert_awaited_once()
+        kwargs = adapter._app.client.chat_postMessage.await_args_list[0].kwargs
+        assert kwargs["thread_ts"] == "222.000001"
+        assert "blocks" not in kwargs
+
+
+# ---------------------------------------------------------------------------
 # TestSendDocument
 # ---------------------------------------------------------------------------
 

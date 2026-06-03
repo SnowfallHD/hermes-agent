@@ -1257,6 +1257,51 @@ def _emit_failure_cluster_event(error_message: str, job_id: str) -> None:
         logger.debug("failure_cluster_registry error", exc_info=True)
 
 
+def _cron_success_mind_signal_reason(job: dict, final_response: str) -> str | None:
+    """Classify observable cron synthesis/orientation as a mind signal.
+
+    This is intentionally narrower than "any successful cron output": a mind
+    event should reflect cross-time synthesis/orientation behavior, not raw script
+    status or generic completion logs.
+    """
+
+    job_name = str(job.get("name") or "")
+    prompt = str(job.get("prompt") or "")
+    combined = f"{job_name}\n{prompt}\n{final_response}".lower()
+    has_synthesis = any(
+        term in combined
+        for term in (
+            "synthes",
+            "orientation",
+            "commander update",
+            "commander synthesis",
+            "context curator",
+            "context curation",
+            "cross-time",
+            "cross time",
+            "recent sessions",
+            "operating picture",
+            "what matters now",
+        )
+    )
+    has_cross_time_source = any(
+        term in combined
+        for term in (
+            "recent session",
+            "session_search",
+            "board state",
+            "kanban board",
+            "cron output",
+            "latest outputs",
+            "recent conversations",
+            "context",
+        )
+    )
+    if has_synthesis and has_cross_time_source:
+        return "cross_time_synthesis"
+    return None
+
+
 def _append_cron_mind_event(job: dict, result: tuple[bool, str, str, Optional[str]]) -> None:
     """Best-effort bridge from completed cron runs into the Mind Event ledger."""
 
@@ -1266,6 +1311,7 @@ def _append_cron_mind_event(job: dict, result: tuple[bool, str, str, Optional[st
         success, _output, final_response, error = result
         job_id = str(job.get("id") or "cron")
         job_name = str(job.get("name") or job.get("prompt") or job_id)
+        signal_reason = _cron_success_mind_signal_reason(job, final_response) if success else None
         if success and final_response == SILENT_MARKER:
             # A successful silent cron tick is intentionally the absence of a
             # cognition or operator-action signal. Recording every quiet success
@@ -1283,6 +1329,12 @@ def _append_cron_mind_event(job: dict, result: tuple[bool, str, str, Optional[st
                 category = "revenue"
                 why_it_matters = "This cron result appears connected to Kryden revenue discovery or the $50k MRR loop."
                 next_best_action = "create_task"
+            elif signal_reason:
+                kind = "mind_signal"
+                event_type = "mind_signal"
+                category = "mind"
+                why_it_matters = "This cron result synthesized cross-time context into an operator orientation without exposing raw chain-of-thought."
+                next_best_action = "watch"
             else:
                 kind = "cron_result"
                 event_type = "cron_result"
@@ -1320,7 +1372,7 @@ def _append_cron_mind_event(job: dict, result: tuple[bool, str, str, Optional[st
             urgency=urgency,
             autonomy_quality=autonomy_quality,
             next_best_action=next_best_action,
-            metadata={"job_id": job_id, "schedule": job.get("schedule_display") or job.get("schedule"), "error": error or ""},
+            metadata={"job_id": job_id, "schedule": job.get("schedule_display") or job.get("schedule"), "error": error or "", "signal_reason": signal_reason or ""},
         )
     except Exception:
         return

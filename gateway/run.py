@@ -4480,6 +4480,13 @@ class GatewayRunner:
         # so human-in-the-loop workflows hear back without polling.
         asyncio.create_task(self._kanban_notifier_watcher())
 
+        # Start local Kryden Kanban→Linear human-gate mirror watcher when the
+        # profile has the script + LINEAR_API_KEY configured. This is the
+        # gateway-owned replacement for the old cron/watchdog pair: Kanban stays
+        # the source of truth for agent work, while Linear receives only
+        # Coop-actionable blocked/unblocked mirrors.
+        asyncio.create_task(self._kryden_linear_blocked_sync_watcher())
+
         # Start background kanban dispatcher — spawns workers for ready
         # tasks. Gated by `kanban.dispatch_in_gateway` (default True).
         # When false, users run `hermes kanban daemon` externally or
@@ -4892,6 +4899,110 @@ class GatewayRunner:
             return get_active_profile_name() or "default"
         except Exception:
             return "default"
+
+    async def _kryden_linear_blocked_sync_watcher(self, interval: float = 3.0) -> None:
+        """Gateway-owned Kryden Kanban→Linear human-gate mirror watcher.
+
+        This local integration replaces the old cron/watchdog pair for Coop's
+        setup. It watches the Kryden board event log and invokes the
+        deterministic ``kryden_linear_blocked_sync.py`` reconciler only when a
+        relevant Kanban event occurs. The reconciler owns Linear API semantics
+        and decides which blocked cards are truly Coop-actionable.
+        """
+        import subprocess
+
+        script = _hermes_home / "scripts" / "kryden_linear_blocked_sync.py"
+        board = os.getenv("KRYDEN_LINEAR_KANBAN_BOARD", "kryden-50k-mrr")
+        db_path = _hermes_home / "kanban" / "boards" / board / "kanban.db"
+        state_path = _hermes_home / "kryden" / "linear_blocked_sync_watch_state.json"
+        relevant_kinds = {"blocked", "unblocked", "completed", "archived", "promoted", "gave_up"}
+
+        await asyncio.sleep(8)
+        if not script.exists():
+            logger.debug("Kryden Linear blocked sync watcher disabled: missing %s", script)
+            return
+        if not os.getenv("LINEAR_API_KEY"):
+            logger.info("Kryden Linear blocked sync watcher disabled: LINEAR_API_KEY is not set")
+            return
+
+        def _load_state() -> dict:
+            try:
+                return json.loads(state_path.read_text(encoding="utf-8")) if state_path.exists() else {}
+            except Exception:
+                return {}
+
+        def _save_state(state: dict) -> None:
+            state_path.parent.mkdir(parents=True, exist_ok=True)
+            tmp = state_path.with_suffix(state_path.suffix + ".tmp")
+            tmp.write_text(json.dumps(state, indent=2, sort_keys=True), encoding="utf-8")
+            tmp.replace(state_path)
+
+        def _latest_events(after_id: int) -> tuple[int, list[tuple[int, str, str]]]:
+            if not db_path.exists():
+                return after_id, []
+            with sqlite3.connect(f"file:{db_path}?mode=ro", uri=True, timeout=5) as conn:
+                rows = conn.execute(
+                    "select id, task_id, kind from task_events where id > ? order by id asc limit 500",
+                    (after_id,),
+                ).fetchall()
+            latest = max([after_id, *[int(r[0]) for r in rows]], default=after_id)
+            relevant = [(int(r[0]), str(r[1]), str(r[2])) for r in rows if str(r[2]) in relevant_kinds]
+            return latest, relevant
+
+        def _run_sync(reason: str) -> tuple[int, str, str]:
+            proc = subprocess.run(
+                [sys.executable, str(script)],
+                text=True,
+                capture_output=True,
+                timeout=180,
+                cwd=str(_hermes_home),
+            )
+            return proc.returncode, proc.stdout.strip(), proc.stderr.strip()
+
+        state = await asyncio.to_thread(_load_state)
+        last_id = int(state.get("last_event_id") or 0)
+        if last_id <= 0 and db_path.exists():
+            try:
+                with sqlite3.connect(f"file:{db_path}?mode=ro", uri=True, timeout=5) as conn:
+                    row = conn.execute("select coalesce(max(id), 0) from task_events").fetchone()
+                last_id = int(row[0] or 0)
+                state["last_event_id"] = last_id
+                state["updated_at"] = int(time.time())
+                await asyncio.to_thread(_save_state, state)
+            except Exception as exc:
+                logger.warning("Kryden Linear blocked sync watcher initial cursor failed: %s", exc)
+        # Reconcile once on gateway startup so stale Linear mirrors are corrected
+        # even if the old cron backstop has been removed.
+        try:
+            code, out, err = await asyncio.to_thread(_run_sync, "gateway-startup")
+            if out:
+                logger.info("Kryden Linear blocked sync startup: %s", out[:2000])
+            if code != 0:
+                logger.warning("Kryden Linear blocked sync startup failed: %s", (err or out)[:2000])
+        except Exception as exc:
+            logger.warning("Kryden Linear blocked sync startup error: %s", exc)
+
+        logger.info("Kryden Linear blocked sync watcher started for board %s at event_id=%s", board, last_id)
+        while self._running:
+            try:
+                latest, relevant = await asyncio.to_thread(_latest_events, last_id)
+                if relevant:
+                    reason = ",".join(f"{tid}:{kind}" for _, tid, kind in relevant[-8:])
+                    code, out, err = await asyncio.to_thread(_run_sync, reason)
+                    if out:
+                        logger.info("Kryden Linear blocked sync after %s: %s", reason, out[:2000])
+                    if code != 0:
+                        logger.warning("Kryden Linear blocked sync failed after %s: %s", reason, (err or out)[:2000])
+                    state["last_relevant"] = relevant[-20:]
+                if latest != last_id:
+                    last_id = latest
+                    state["last_event_id"] = last_id
+                    state["updated_at"] = int(time.time())
+                    await asyncio.to_thread(_save_state, state)
+            except Exception as exc:
+                logger.warning("Kryden Linear blocked sync watcher error: %s", exc)
+                await asyncio.sleep(10)
+            await asyncio.sleep(interval)
 
     async def _kanban_notifier_watcher(self, interval: float = 5.0) -> None:
         """Poll ``kanban_notify_subs`` and deliver terminal events to users.

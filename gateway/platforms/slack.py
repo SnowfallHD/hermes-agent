@@ -795,6 +795,56 @@ class SlackAdapter(BasePlatformAdapter):
             thread_ts = self._resolve_thread_ts(reply_to, metadata)
             last_result = None
 
+            auto_split = self._split_auto_parent_thread_content(content, thread_ts)
+            if auto_split:
+                parent_raw, detail_raw = auto_split
+                parent_formatted = self.format_message(parent_raw)
+                parent_chunks = self.truncate_message(parent_formatted, self.MAX_MESSAGE_LENGTH)
+                parent_text = parent_chunks[0] if parent_chunks else parent_formatted
+                parent_kwargs = {
+                    "channel": chat_id,
+                    "text": parent_text,
+                    "mrkdwn": True,
+                }
+                blocks = self._build_parent_summary_blocks(parent_raw)
+                if blocks:
+                    parent_kwargs["blocks"] = blocks
+
+                parent_result = await self._get_client(chat_id).chat_postMessage(**parent_kwargs)
+                parent_ts = parent_result.get("ts")
+                if parent_ts:
+                    self._bot_message_ts.add(parent_ts)
+
+                detail_formatted = self.format_message(detail_raw)
+                detail_chunks = self.truncate_message(detail_formatted, self.MAX_MESSAGE_LENGTH)
+                for chunk in detail_chunks:
+                    kwargs = {
+                        "channel": chat_id,
+                        "text": chunk,
+                        "mrkdwn": True,
+                    }
+                    if parent_ts:
+                        kwargs["thread_ts"] = parent_ts
+                    last_result = await self._get_client(chat_id).chat_postMessage(**kwargs)
+
+                sent_ts = last_result.get("ts") if last_result else parent_ts
+                if sent_ts:
+                    self._bot_message_ts.add(sent_ts)
+                if len(self._bot_message_ts) > self._BOT_TS_MAX:
+                    excess = len(self._bot_message_ts) - self._BOT_TS_MAX // 2
+                    for old_ts in list(self._bot_message_ts)[:excess]:
+                        self._bot_message_ts.discard(old_ts)
+
+                return SendResult(
+                    success=True,
+                    message_id=parent_ts or sent_ts,
+                    raw_response={
+                        "parent": parent_result,
+                        "last_reply": last_result,
+                        "auto_threaded": True,
+                    },
+                )
+
             # reply_broadcast: also post thread replies to the main channel.
             # Controlled via platform config: gateway.slack.reply_broadcast
             broadcast = self.config.extra.get("reply_broadcast", False)
@@ -839,6 +889,99 @@ class SlackAdapter(BasePlatformAdapter):
         except Exception as e:  # pragma: no cover - defensive logging
             logger.error("[Slack] Send error: %s", e, exc_info=True)
             return SendResult(success=False, error=str(e))
+
+    def _auto_parent_thread_enabled(self) -> bool:
+        raw = self.config.extra.get("auto_parent_thread")
+        if raw is None:
+            return True
+        return str(raw).strip().lower() in {"1", "true", "yes", "on"}
+
+    def _split_auto_parent_thread_content(
+        self,
+        content: str,
+        thread_ts: Optional[str],
+    ) -> Optional[Tuple[str, str]]:
+        """Split a long top-level Slack reply into compact parent + thread detail.
+
+        Slack has no arbitrary font-size controls in mrkdwn. The parent half is
+        later rendered with a Block Kit ``header`` block, which is Slack's
+        native larger-text surface; the detail half remains normal mrkdwn in
+        the newly-created thread.
+        """
+        if thread_ts or not self._auto_parent_thread_enabled():
+            return None
+        text = (content or "").strip()
+        if not text:
+            return None
+
+        lines = [line.rstrip() for line in text.splitlines()]
+        nonempty_count = sum(1 for line in lines if line.strip())
+        structured_markers = (
+            "Root cause:", "Evidence:", "Files changed:", "Commands/tests run:",
+            "Result:", "Remaining risk:", "Next action:", "Detailed breakdown:",
+            "Details:", "Thread detail",
+        )
+        if len(text) < 700 and nonempty_count < 9 and not any(m in text for m in structured_markers):
+            return None
+
+        parent_lines: List[str] = []
+        detail_start = 0
+        parent_chars = 0
+        seen_content = 0
+        for idx, line in enumerate(lines):
+            stripped = line.strip()
+            if not stripped and seen_content:
+                if seen_content >= 2:
+                    detail_start = idx + 1
+                    break
+                continue
+            if not stripped:
+                continue
+            line_len = len(line)
+            if seen_content >= 6 or parent_chars + line_len > 650:
+                detail_start = idx
+                break
+            parent_lines.append(line)
+            parent_chars += line_len + 1
+            seen_content += 1
+        else:
+            detail_start = len(lines)
+
+        parent = "\n".join(parent_lines).strip()
+        detail = "\n".join(lines[detail_start:]).strip()
+        if not parent or not detail:
+            return None
+        return parent, detail
+
+    def _build_parent_summary_blocks(self, parent_raw: str) -> Optional[List[Dict[str, Any]]]:
+        lines = [line.strip() for line in (parent_raw or "").splitlines() if line.strip()]
+        if not lines:
+            return None
+        header = self._plain_slack_header(lines[0])[:150] or "Hermes update"
+        body_raw = "\n".join(lines[1:]).strip()
+        blocks: List[Dict[str, Any]] = [
+            {
+                "type": "header",
+                "text": {"type": "plain_text", "text": header, "emoji": True},
+            }
+        ]
+        if body_raw:
+            blocks.append(
+                {
+                    "type": "section",
+                    "text": {"type": "mrkdwn", "text": self.format_message(body_raw)[:3000]},
+                }
+            )
+        return blocks
+
+    @staticmethod
+    def _plain_slack_header(text: str) -> str:
+        text = re.sub(r"```.*?```", "", text, flags=re.DOTALL)
+        text = re.sub(r"`([^`]*)`", r"\1", text)
+        text = re.sub(r"\[([^\]]+)\]\([^\)]+\)", r"\1", text)
+        text = re.sub(r"[*_~]", "", text)
+        text = text.replace("<", "").replace(">", "")
+        return re.sub(r"\s+", " ", text).strip()
 
     async def send_private_notice(
         self,

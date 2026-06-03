@@ -271,6 +271,111 @@ def _entry_time(entry: dict[str, Any]) -> float:
     return 0.0
 
 
+def _is_high_signal_entry(entry: dict[str, Any]) -> bool:
+    event_type = _clean_text(entry.get("event_type"), limit=80)
+    category = _clean_text(entry.get("category"), limit=80)
+    kind = _clean_text(entry.get("kind"), limit=80)
+    source = _clean_text(entry.get("source"), limit=80)
+    text = " ".join(
+        _clean_text(entry.get(field), limit=240).lower()
+        for field in ("summary", "thought", "why_it_matters", "next_best_action", "autonomy_quality")
+    )
+    high_terms = (
+        "approval-required", "approval-needed", "review-required", "review-go",
+        "crashed", "failed", "failure", "traceback", "timed out", "timeout",
+        "verification failed", "tests failed", "revenue", "$50k", "mrr",
+        "uncertain", "uncertainty", "self-improvement", "self improvement",
+    )
+    low_info_session_kinds = {"terminal", "file_operation", "state_change", "execution", "coordination_or_emission", "planning_or_delegation"}
+    if source in {"session_action_reducer", "material_action_reducer"} and kind in low_info_session_kinds:
+        return any(term in text for term in high_terms)
+    return (
+        event_type in {"approval_boundary", "risk_signal", "uncertainty_signal", "revenue_signal", "opportunity_signal", "self_improvement_signal", "policy_candidate"}
+        or category in {"revenue", "uncertainty", "self_improvement"}
+        or kind in {"blocked", "crashed", "timed_out", "spawn_failed", "spawn_auto_blocked", "gave_up", "protocol_violation", "terminal_error", "skill_change"}
+        or any(term in text for term in high_terms)
+    )
+
+
+def _action_template_signature(entry: dict[str, Any]) -> str:
+    source = _clean_text(entry.get("source"), limit=80)
+    kind = _clean_text(entry.get("kind"), limit=80)
+    event_type = _clean_text(entry.get("event_type"), limit=80)
+    if source == "kanban":
+        return f"kanban:{kind or event_type}"
+    if source in {"session_action_reducer", "material_action_reducer"}:
+        return f"session:{kind or event_type}"
+    summary = re.sub(r"t_[a-f0-9]{6,}", "t_<id>", _clean_text(entry.get("summary") or entry.get("thought"), limit=140).lower())
+    summary = re.sub(r"\d+", "#", summary)
+    return f"{source}:{kind or event_type}:{summary}"
+
+
+def _compress_repeated_low_information_actions(entries: list[dict[str, Any]], *, min_count: int = 3) -> tuple[list[dict[str, Any]], list[dict[str, Any]]]:
+    buckets: dict[str, list[dict[str, Any]]] = {}
+    passthrough: list[dict[str, Any]] = []
+    compressible_sources = {"kanban", "session_action_reducer", "material_action_reducer"}
+    for entry in entries:
+        source = _clean_text(entry.get("source"), limit=80)
+        if source not in compressible_sources or _is_high_signal_entry(entry):
+            passthrough.append(entry)
+            continue
+        signature = _action_template_signature(entry)
+        buckets.setdefault(signature, []).append(entry)
+    compressed: list[dict[str, Any]] = []
+    for signature, rows in buckets.items():
+        if len(rows) < min_count:
+            passthrough.extend(rows)
+            continue
+        rows = sorted(rows, key=lambda row: (_entry_time(row), str(row.get("id", ""))))
+        refs: list[str] = []
+        for row in rows:
+            for ref in row.get("evidence_refs") or []:
+                text = _clean_ref(ref)
+                if text and text not in refs:
+                    refs.append(text)
+                if len(refs) >= 8:
+                    break
+            if len(refs) >= 8:
+                break
+        start = _entry_time(rows[0])
+        end = _entry_time(rows[-1])
+        counts_by_kind: dict[str, int] = {}
+        counts_by_source: dict[str, int] = {}
+        for row in rows:
+            k = _clean_text(row.get("kind") or row.get("event_type") or "unknown", limit=80)
+            s = _clean_text(row.get("source") or "unknown", limit=80)
+            counts_by_kind[k] = counts_by_kind.get(k, 0) + 1
+            counts_by_source[s] = counts_by_source.get(s, 0) + 1
+        checksum = sum(ord(ch) for ch in signature) % 1_000_000
+        thought = f"Compressed {len(rows)} repeated low-information action Thoughts into one meta-event."
+        compressed.append({
+            "id": f"compressed-action-template:{checksum}:{int(start)}:{int(end)}",
+            "event_seq": int(max((entry.get("event_seq") or 0) for entry in rows)),
+            "created_at": end,
+            "source": "repeated_action_template_compressor",
+            "kind": "compressed_action_template",
+            "event_type": "policy_candidate",
+            "category": "self_improvement",
+            "thought": thought,
+            "summary": thought,
+            "why_it_matters": "Repeated mechanical action templates make Thoughts look busy without improving orientation; aggregate them while preserving approval/review blockers, failures, verification failures, revenue, uncertainty, and self-improvement signals individually.",
+            "window": {"start": start, "end": end, "seconds": int(max(0, end - start))},
+            "counts": {"total": len(rows), "by_kind": counts_by_kind, "by_source": counts_by_source},
+            "template_signature": signature,
+            "representative_evidence_refs": refs,
+            "evidence_refs": refs,
+            "confidence_label": "high",
+            "urgency": "silent",
+            "autonomy_quality": "compressed_low_information_repeats",
+            "next_best_action": "watch",
+            "raw_chain_of_thought": False,
+        })
+    merged = [*passthrough, *compressed]
+    merged.sort(key=lambda entry: (_entry_time(entry), str(entry.get("id", ""))))
+    compressed.sort(key=lambda entry: (_entry_time(entry), str(entry.get("id", ""))))
+    return merged, compressed
+
+
 def _merge_entries(*groups: list[dict[str, Any]], limit: int) -> list[dict[str, Any]]:
     merged: list[dict[str, Any]] = []
     for group in groups:
@@ -760,7 +865,11 @@ def _query_entries(
         action_entries = _session_action_reducer(include_all_profiles=include_all_profiles, limit=limit) if session_actions else []
         material_entries = material_action_reducer(include_all_profiles=include_all_profiles, limit=limit)
         entries = _merge_entries(entries, mind_entries, churn_entries, action_entries, material_entries, limit=limit)
-        entries = _validate_cognition_entries(entries)
+        entries, compressed_action_entries = _compress_repeated_low_information_actions(entries)
+        entries = _validate_cognition_entries(entries[-limit:])
+        for entry in entries:
+            if entry.get("source") == "repeated_action_template_compressor":
+                entry.setdefault("compression_meta_events", len(compressed_action_entries))
         latest = conn.execute("SELECT COALESCE(MAX(id), 0) FROM task_events").fetchone()[0]
         return entries, int(latest or 0), active_board, mind_ledger
     finally:
