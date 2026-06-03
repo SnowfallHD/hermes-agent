@@ -68,11 +68,11 @@ def _tool_name_and_args(call: dict[str, Any]) -> tuple[str, dict[str, Any]]:
 
 def _configured_profile_homes(*, include_all: bool) -> list[tuple[str, Path]]:
     from pathlib import Path
-    
+
     active_home = Path(get_hermes_home())
     if not include_all:
         return [(_clean_text(active_home.name, limit=40) or "active", active_home)]
-    
+
     root = active_home.parent if active_home.parent.name == "profiles" else active_home
     homes: list[tuple[str, Path]] = [("default", root)]
     profiles_dir = root / "profiles"
@@ -107,19 +107,19 @@ def _entry_time(entry: dict[str, Any]) -> float:
 
 def material_action_reducer(*, include_all_profiles: bool = False, limit: int = 100) -> list[dict[str, Any]]:
     """Producer for material/operational actions not captured by routine filtering.
-    
+
     Emits self_improvement_signal or uncertainty_signal entries for terminal,
     file operations (read/write/patch), and skill management tools.
-    
+
     Args:
         include_all_profiles: If True, scan all configured profiles. Otherwise, just active profile.
         limit: Max number of entries to return.
-    
+
     Returns:
         List of sparse operational thought entries.
     """
     out: list[dict[str, Any]] = []
-    
+
     for profile, home in _configured_profile_homes(include_all=include_all_profiles):
         db_path = home / "state.db"
         if not db_path.exists():
@@ -129,7 +129,7 @@ def material_action_reducer(*, include_all_profiles: bool = False, limit: int = 
             conn.row_factory = sqlite3.Row
         except sqlite3.Error:
             continue
-        
+
         try:
             # Get messages with tool calls
             rows = conn.execute(
@@ -142,7 +142,7 @@ def material_action_reducer(*, include_all_profiles: bool = False, limit: int = 
                 """,
                 (max(50, min(limit * 10, 1000)),),
             ).fetchall()
-            
+
             result_rows = conn.execute(
                 """
                 SELECT tool_call_id, tool_name, content
@@ -156,25 +156,25 @@ def material_action_reducer(*, include_all_profiles: bool = False, limit: int = 
         except sqlite3.Error:
             conn.close()
             continue
-        
+
         results = {str(row["tool_call_id"]): str(row["content"] or "") for row in result_rows}
         by_session: dict[str, dict[str, Any]] = {}
-        
+
         for row in reversed(rows):
             session_id = str(row["session_id"] or "")
             bucket = by_session.setdefault(session_id, {"created_at": row["timestamp"], "message_ids": [], "tools": {}, "kinds": set()})
             bucket["created_at"] = max(float(bucket["created_at"] or 0), float(row["timestamp"] or 0))
-            
+
             for call in _decode_tool_calls(row["tool_calls"]):
                 if not isinstance(call, dict):
                     continue
-                
+
                 tool_name, args = _tool_name_and_args(call)
                 if not tool_name or tool_name not in _MATERIAL_TOOLS:
                     continue
-                
+
                 result = results.get(str(call.get("id") or ""), "")
-                
+
                 # Determine kind based on tool
                 if tool_name == "terminal":
                     if _ERROR_RE.search(result or ""):
@@ -187,15 +187,15 @@ def material_action_reducer(*, include_all_profiles: bool = False, limit: int = 
                     kind = "skill_change"
                 else:
                     kind = tool_name
-                
+
                 bucket["message_ids"].append(int(row["id"]))
                 bucket["tools"][tool_name] = int(bucket["tools"].get(tool_name, 0)) + 1
                 bucket["kinds"].add(kind)
-        
+
         for session_id, bucket in by_session.items():
             kinds = set(bucket["kinds"])
             refs = [f"session:{session_id}", f"profile:{profile}"] + [f"message:{mid}" for mid in sorted(set(bucket["message_ids"]))[:6]]
-            
+
             for kind in sorted(kinds):
                 if kind == "terminal":
                     out.append({
@@ -281,8 +281,8 @@ def material_action_reducer(*, include_all_profiles: bool = False, limit: int = 
                         "next_best_action": "watch",
                         "raw_chain_of_thought": False,
                     })
-        
+
         conn.close()
-    
+
     out.sort(key=lambda entry: (_entry_time(entry), str(entry.get("id", ""))))
     return out[-limit:]
