@@ -11670,7 +11670,10 @@ class GatewayRunner:
             return t("gateway.goal.unavailable")
 
         if not args or lower == "status":
-            return mgr.status_line()
+            status = mgr.status_line()
+            if getattr(getattr(event, "source", None), "platform", None) == Platform.SLACK:
+                status += "\nControls: `!goal status` · `!goal pause` · `!goal resume` · `!goal end`"
+            return status
 
         if lower == "pause":
             state = mgr.pause(reason="user-paused")
@@ -11691,7 +11694,7 @@ class GatewayRunner:
                 return t("gateway.goal.no_resume")
             return t("gateway.goal.resumed", goal=state.goal)
 
-        if lower in {"clear", "stop", "done"}:
+        if lower in {"clear", "stop", "done", "end"}:
             had = mgr.has_goal()
             mgr.clear()
             try:
@@ -11726,7 +11729,14 @@ class GatewayRunner:
             except Exception as exc:
                 logger.debug("goal kickoff enqueue failed: %s", exc)
 
-        return t("gateway.goal.set", budget=state.max_turns, goal=state.goal)
+        notice = t("gateway.goal.set", budget=state.max_turns, goal=state.goal)
+        if getattr(getattr(event, "source", None), "platform", None) == Platform.SLACK:
+            notice = (
+                f"⊙ Goal set ({state.max_turns}-turn budget): {state.goal}\n"
+                "I'll keep working until the goal is done, you pause/end it, or the budget is exhausted.\n"
+                "Controls: `!goal status` · `!goal pause` · `!goal resume` · `!goal end`"
+            )
+        return notice
 
     async def _handle_subgoal_command(self, event: "MessageEvent") -> str:
         """Handle /subgoal for gateway platforms (mirror of CLI handler).
