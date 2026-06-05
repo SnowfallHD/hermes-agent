@@ -177,6 +177,7 @@ class TestRunJobProfileContext:
                 observed["hermes_home_during_init"] = str(get_hermes_home())
                 observed["scheduler_home_during_init"] = str(sched._get_hermes_home())
                 observed["skip_context_files"] = kwargs.get("skip_context_files")
+                observed["skip_memory"] = kwargs.get("skip_memory")
 
             def run_conversation(self, *_a, **_kw):
                 from hermes_constants import get_hermes_home
@@ -351,7 +352,100 @@ class TestRunJobProfileContext:
 
         assert success is True
         assert observed["hermes_home_during_init"] == str(root)
+        assert observed["skip_memory"] is True
         assert os.environ["HERMES_HOME"] == str(root)
+
+    def test_run_job_preserves_stateless_cron_default(
+        self, isolated_cron_profile_home, monkeypatch
+    ):
+        import cron.scheduler as sched
+
+        _root, _profile_home = isolated_cron_profile_home
+        observed: dict = {}
+        self._install_agent_stubs(monkeypatch, observed)
+
+        job = {
+            "id": "cron-memory-default",
+            "name": "cron-memory-default",
+            "schedule_display": "manual",
+        }
+
+        success, *_ = sched.run_job(job)
+
+        assert success is True
+        assert observed["skip_memory"] is True
+
+    def test_run_job_honors_cron_inherit_memory_opt_in(
+        self, isolated_cron_profile_home, monkeypatch
+    ):
+        import cron.scheduler as sched
+
+        root, _profile_home = isolated_cron_profile_home
+        (root / "config.yaml").write_text(
+            "cron:\n  inherit_memory: true\n",
+            encoding="utf-8",
+        )
+        observed: dict = {}
+        self._install_agent_stubs(monkeypatch, observed)
+
+        job = {
+            "id": "cron-memory-opt-in",
+            "name": "cron-memory-opt-in",
+            "schedule_display": "manual",
+        }
+
+        success, *_ = sched.run_job(job)
+
+        assert success is True
+        assert observed["skip_memory"] is False
+
+    def test_run_job_honors_cron_skip_memory_false(
+        self, isolated_cron_profile_home, monkeypatch
+    ):
+        import cron.scheduler as sched
+
+        root, _profile_home = isolated_cron_profile_home
+        (root / "config.yaml").write_text(
+            "cron:\n  skip_memory: false\n  inherit_memory: true\n",
+            encoding="utf-8",
+        )
+        observed: dict = {}
+        self._install_agent_stubs(monkeypatch, observed)
+
+        job = {
+            "id": "cron-skip-memory-false",
+            "name": "cron-skip-memory-false",
+            "schedule_display": "manual",
+        }
+
+        success, *_ = sched.run_job(job)
+
+        assert success is True
+        assert observed["skip_memory"] is False
+
+    def test_run_job_explicit_cron_skip_memory_wins_over_inherit_memory(
+        self, isolated_cron_profile_home, monkeypatch
+    ):
+        import cron.scheduler as sched
+
+        root, _profile_home = isolated_cron_profile_home
+        (root / "config.yaml").write_text(
+            "cron:\n  skip_memory: true\n  inherit_memory: true\n",
+            encoding="utf-8",
+        )
+        observed: dict = {}
+        self._install_agent_stubs(monkeypatch, observed)
+
+        job = {
+            "id": "cron-skip-memory-wins",
+            "name": "cron-skip-memory-wins",
+            "schedule_display": "manual",
+        }
+
+        success, *_ = sched.run_job(job)
+
+        assert success is True
+        assert observed["skip_memory"] is True
 
     def test_run_job_falls_back_on_missing_runtime_profile(
         self, isolated_cron_profile_home, monkeypatch

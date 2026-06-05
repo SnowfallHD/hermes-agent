@@ -42,6 +42,7 @@ from hermes_constants import get_hermes_home
 from hermes_cli._subprocess_compat import windows_hide_flags
 from hermes_cli.config import load_config, _expand_env_vars
 from hermes_time import now as _hermes_now
+from utils import is_truthy_value
 
 logger = logging.getLogger(__name__)
 
@@ -1898,6 +1899,17 @@ def _run_job_impl(job: dict) -> tuple[bool, str, str, Optional[str]]:
                 job_id, _mcp_exc,
             )
 
+        _cron_cfg = {}
+        if isinstance(_cfg, dict):
+            _raw_cron_cfg = _cfg.get("cron")
+            if isinstance(_raw_cron_cfg, dict):
+                _cron_cfg = _raw_cron_cfg
+        _cron_inherit_memory = is_truthy_value(_cron_cfg.get("inherit_memory", False))
+        if "skip_memory" in _cron_cfg:
+            _cron_skip_memory = is_truthy_value(_cron_cfg.get("skip_memory"), default=True)
+        else:
+            _cron_skip_memory = not _cron_inherit_memory
+
         agent = AIAgent(
             model=model,
             api_key=runtime.get("api_key"),
@@ -1925,7 +1937,7 @@ def _run_job_impl(job: dict) -> tuple[bool, str, str, Optional[str]]:
             # Without a workdir, keep cwd context discovery disabled.
             skip_context_files=not bool(_job_workdir),
             load_soul_identity=True,
-            skip_memory=True,  # Cron system prompts would corrupt user representations
+            skip_memory=_cron_skip_memory,
             platform="cron",
             session_id=_cron_session_id,
             session_db=_session_db,

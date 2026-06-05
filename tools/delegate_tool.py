@@ -1103,6 +1103,12 @@ def _build_child_agent(
         # openrouter/pareto-code), so we keep it inherited even when the
         # provider is overridden — it's a no-op on any other model.
 
+    inherit_memory = is_truthy_value(delegation_cfg.get("inherit_memory", False))
+    if "skip_memory" in delegation_cfg:
+        child_skip_memory = is_truthy_value(delegation_cfg.get("skip_memory"), default=True)
+    else:
+        child_skip_memory = not inherit_memory
+
     child = AIAgent(
         base_url=effective_base_url,
         api_key=effective_api_key,
@@ -1122,7 +1128,7 @@ def _build_child_agent(
         log_prefix=f"[subagent-{task_index}]",
         platform=parent_agent.platform,
         skip_context_files=True,
-        skip_memory=True,
+        skip_memory=child_skip_memory,
         clarify_callback=None,
         thinking_callback=child_thinking_cb,
         session_db=getattr(parent_agent, "_session_db", None),

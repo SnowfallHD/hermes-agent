@@ -390,6 +390,95 @@ class TestDelegateTask(unittest.TestCase):
 
         self.assertIs(mock_child._print_fn, sink)
 
+
+    def test_child_memory_is_skipped_by_default(self):
+        parent = _make_mock_parent(depth=0)
+
+        with patch("tools.delegate_tool._load_config", return_value={}), \
+             patch("run_agent.AIAgent") as MockAgent:
+            mock_child = MagicMock()
+            MockAgent.return_value = mock_child
+
+            _build_child_agent(
+                task_index=0,
+                goal="default stateless child",
+                context=None,
+                toolsets=None,
+                model=None,
+                max_iterations=10,
+                parent_agent=parent,
+                task_count=1,
+            )
+
+        _, kwargs = MockAgent.call_args
+        self.assertIs(kwargs["skip_memory"], True)
+
+    def test_child_honors_delegation_inherit_memory_opt_in(self):
+        parent = _make_mock_parent(depth=0)
+
+        with patch("tools.delegate_tool._load_config", return_value={"inherit_memory": True}), \
+             patch("run_agent.AIAgent") as MockAgent:
+            mock_child = MagicMock()
+            MockAgent.return_value = mock_child
+
+            _build_child_agent(
+                task_index=0,
+                goal="shared brain child",
+                context=None,
+                toolsets=None,
+                model=None,
+                max_iterations=10,
+                parent_agent=parent,
+                task_count=1,
+            )
+
+        _, kwargs = MockAgent.call_args
+        self.assertIs(kwargs["skip_memory"], False)
+
+    def test_child_honors_delegation_skip_memory_false(self):
+        parent = _make_mock_parent(depth=0)
+
+        with patch("tools.delegate_tool._load_config", return_value={"skip_memory": False, "inherit_memory": True}), \
+             patch("run_agent.AIAgent") as MockAgent:
+            mock_child = MagicMock()
+            MockAgent.return_value = mock_child
+
+            _build_child_agent(
+                task_index=0,
+                goal="explicit stateful child",
+                context=None,
+                toolsets=None,
+                model=None,
+                max_iterations=10,
+                parent_agent=parent,
+                task_count=1,
+            )
+
+        _, kwargs = MockAgent.call_args
+        self.assertIs(kwargs["skip_memory"], False)
+
+    def test_child_explicit_skip_memory_wins_over_inherit_memory(self):
+        parent = _make_mock_parent(depth=0)
+
+        with patch("tools.delegate_tool._load_config", return_value={"skip_memory": True, "inherit_memory": True}), \
+             patch("run_agent.AIAgent") as MockAgent:
+            mock_child = MagicMock()
+            MockAgent.return_value = mock_child
+
+            _build_child_agent(
+                task_index=0,
+                goal="explicit stateless child",
+                context=None,
+                toolsets=None,
+                model=None,
+                max_iterations=10,
+                parent_agent=parent,
+                task_count=1,
+            )
+
+        _, kwargs = MockAgent.call_args
+        self.assertIs(kwargs["skip_memory"], True)
+
     def test_child_uses_thinking_callback_when_progress_callback_available(self):
         parent = _make_mock_parent(depth=0)
         parent.tool_progress_callback = MagicMock()

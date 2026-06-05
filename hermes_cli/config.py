@@ -1690,6 +1690,13 @@ DEFAULT_CONFIG = {
         # Flip to true only if you trust delegated work to run dangerous cmds
         # without human review (cron pipelines, batch automation, etc.).
         "subagent_auto_approve": False,
+        # Direct control over AIAgent(skip_memory=...). Default true preserves
+        # historical isolated-subagent behavior. Set false for shared-brain
+        # installs where children should load persistent memory/profile context.
+        "skip_memory": True,
+        # Positive-alias opt-in retained for readability/backcompat: when
+        # skip_memory is absent, inherit_memory=true makes child agents stateful.
+        "inherit_memory": False,
     },
 
     # Ephemeral prefill messages file — JSON list of {role, content} dicts
@@ -1962,6 +1969,14 @@ DEFAULT_CONFIG = {
         # Wrap delivered cron responses with a header (task name) and footer
         # ("The agent cannot see this message").  Set to false for clean output.
         "wrap_response": True,
+        # Direct control over AIAgent(skip_memory=...). Default true preserves
+        # historical cron behavior where LLM-driven jobs were stateless except
+        # for SOUL/skills/artifacts/session DB. Set false for shared-brain
+        # installs where scheduled agents should load persistent memory.
+        "skip_memory": True,
+        # Positive-alias opt-in retained for readability/backcompat: when
+        # skip_memory is absent, inherit_memory=true makes cron agents stateful.
+        "inherit_memory": False,
         # Maximum number of due jobs to run in parallel per tick.
         # null/0 = unbounded (limited only by thread count).
         # 1 = serial (pre-v0.9 behaviour).
