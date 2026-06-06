@@ -2899,7 +2899,37 @@ class SlackAdapter(BasePlatformAdapter):
             return SendResult(success=False, error="Not connected")
 
         try:
-            cmd_preview = command[:2900] + "..." if len(command) > 2900 else command
+            # Slack section text has a hard 3000-character cap. The old
+            # implementation truncated only the command to 2900 chars, then
+            # added the header + reason, which could still exceed Slack's cap
+            # and cause `invalid_blocks`, dropping approval buttons entirely.
+            reason = description or "dangerous command"
+            header = ":warning: *Command Approval Required*\n"
+            reason_text = f"\nReason: {reason}"
+            max_section_chars = 3000
+            max_cmd_chars = max(
+                128,
+                max_section_chars - len(header) - len("``````") - len(reason_text) - 16,
+            )
+            cmd_preview = command
+            if len(cmd_preview) > max_cmd_chars:
+                cmd_preview = cmd_preview[: max_cmd_chars - 3] + "..."
+            section_text = f"{header}```{cmd_preview}```{reason_text}"
+            if len(section_text) > max_section_chars:
+                overflow = len(section_text) - max_section_chars + 3
+                if overflow < len(reason):
+                    reason = reason[: len(reason) - overflow] + "..."
+                else:
+                    reason = "dangerous command"
+                reason_text = f"\nReason: {reason}"
+                max_cmd_chars = max(
+                    128,
+                    max_section_chars - len(header) - len("``````") - len(reason_text) - 16,
+                )
+                if len(cmd_preview) > max_cmd_chars:
+                    cmd_preview = cmd_preview[: max_cmd_chars - 3] + "..."
+                section_text = f"{header}```{cmd_preview}```{reason_text}"
+
             thread_ts = self._resolve_thread_ts(None, metadata)
 
             blocks = [
@@ -2907,11 +2937,7 @@ class SlackAdapter(BasePlatformAdapter):
                     "type": "section",
                     "text": {
                         "type": "mrkdwn",
-                        "text": (
-                            f":warning: *Command Approval Required*\n"
-                            f"```{cmd_preview}```\n"
-                            f"Reason: {description}"
-                        ),
+                        "text": section_text,
                     },
                 },
                 {

@@ -115,6 +115,42 @@ class TestSlashCommands:
         runner.request_restart.assert_not_called()
 
     @pytest.mark.asyncio
+    async def test_plaintext_approve_routes_to_approve_command_in_dm(self, adapter, runner, platform):
+        if platform != Platform.TELEGRAM:
+            pytest.skip("Plaintext approval shortcut is verified on Telegram DM adapter")
+
+        runner._handle_approve_command = AsyncMock(return_value="approved via plaintext")
+
+        send = await send_and_capture(adapter, "!approve", platform)
+
+        send.assert_called_once()
+        response_text = send.call_args[1].get("content") or send.call_args[0][1]
+        assert response_text == "approved via plaintext"
+        runner._handle_approve_command.assert_awaited_once()
+
+    @pytest.mark.asyncio
+    async def test_plaintext_approve_in_group_stays_plain_text(self, adapter, runner, platform):
+        if platform != Platform.TELEGRAM:
+            pytest.skip("Shortcut scope is only verified for Telegram here")
+
+        runner._handle_approve_command = AsyncMock(return_value="should-not-run")
+        runner._handle_message_with_agent = AsyncMock(return_value="agent-handled")
+
+        send = await send_and_capture(
+            adapter,
+            "!approve",
+            platform,
+            chat_id="group-chat-1",
+            user_id="u1",
+            chat_type="group",
+        )
+
+        send.assert_called_once()
+        response_text = send.call_args[1].get("content") or send.call_args[0][1]
+        assert response_text == "agent-handled"
+        runner._handle_approve_command.assert_not_called()
+
+    @pytest.mark.asyncio
     async def test_personality_lists_options(self, adapter, platform):
         send = await send_and_capture(adapter, "/personality", platform)
 

@@ -1518,7 +1518,8 @@ def coerce_plaintext_gateway_command(event: "MessageEvent") -> None:
     waits for that same agent to finish.
 
     Scope is intentionally narrow: DM text messages only, exact restart-style
-    phrases only. Group chats keep natural-language semantics.
+    phrases and approval affordance fallbacks only. Group chats keep natural-
+    language semantics.
     """
     try:
         if event is None or event.message_type != MessageType.TEXT:
@@ -1528,6 +1529,13 @@ def coerce_plaintext_gateway_command(event: "MessageEvent") -> None:
             return
         source = getattr(event, "source", None)
         if getattr(source, "chat_type", None) != "dm":
+            return
+        lowered = text.lower()
+        if lowered in {"approve", "!approve", "allow", "allow once"}:
+            event.text = "/approve"
+            return
+        if lowered in {"deny", "!deny", "cancel approval"}:
+            event.text = "/deny"
             return
         for pattern in _PLAINTEXT_GATEWAY_RESTART_PATTERNS:
             if pattern.match(text):

@@ -32,6 +32,13 @@ run_pytest \
   tests/gateway/test_slack.py \
   -k 'AutoParentThread or SlackFormatting or dm_toplevel_preserves_message_id_for_progress_threading or threaded_delivery'
 
+# Slack approval/buttons and plaintext command affordances are custom-risk
+# gateway surfaces: approval prompts must render buttons even for long commands,
+# and DM-only plaintext approval/restart aliases must not leak into groups.
+run_pytest \
+  tests/gateway/test_slack_approval_buttons.py \
+  tests/e2e/test_platform_commands.py
+
 # Standalone send_message Slack thread targeting. This file currently skips when
 # optional telegram deps are absent, so allow pytest's "no tests collected" code.
 run_pytest --allow-no-tests \
