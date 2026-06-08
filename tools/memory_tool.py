@@ -339,7 +339,9 @@ class MemoryStore:
                     "error": (
                         f"Memory at {current:,}/{limit:,} chars. "
                         f"Adding this entry ({len(content)} chars) would exceed the limit. "
-                        f"Replace or remove existing entries first."
+                        f"Consolidate now: use 'replace' to merge overlapping entries into "
+                        f"shorter ones or 'remove' stale or less important entries (see "
+                        f"current_entries below), then retry this add — all in this turn."
                     ),
                     "error_msg": (
                         f"Memory at {current:,}/{limit:,} chars. "
@@ -409,6 +411,7 @@ class MemoryStore:
             new_total = len(ENTRY_DELIMITER.join(test_entries))
 
             if new_total > limit:
+                current = self._char_count(target)
                 return {
                     "success": False,
                     "error_type": "memory_limit_exceeded",
@@ -420,8 +423,12 @@ class MemoryStore:
                     "instruction": "Do not retry replace with same character limit. Consolidate existing memory and provide shorter replacement content.",
                     "error": (
                         f"Replacement would put memory at {new_total:,}/{limit:,} chars. "
-                        f"Shorten the new content or remove other entries first."
+                        f"Shorten the new content, or 'remove' other stale or less important "
+                        f"entries to make room (see current_entries below), then retry — all "
+                        f"in this turn."
                     ),
+                    "current_entries": entries,
+                    "usage": f"{current:,}/{limit:,}",
                 }
 
             entries[idx] = new_content

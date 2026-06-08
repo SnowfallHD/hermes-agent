@@ -9,6 +9,25 @@ set -euo pipefail
 ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 cd "$ROOT"
 
+PYTHON_BIN="${PYTHON:-}"
+if [[ -z "$PYTHON_BIN" ]]; then
+  for candidate in \
+    "$ROOT/.venv/bin/python" \
+    "$ROOT/venv/bin/python" \
+    "$HOME/.hermes/hermes-agent/venv/bin/python" \
+    python3 \
+    python; do
+    if command -v "$candidate" >/dev/null 2>&1; then
+      PYTHON_BIN="$candidate"
+      break
+    fi
+  done
+fi
+if [[ -z "$PYTHON_BIN" ]]; then
+  echo "No Python interpreter found for upstream integration tests" >&2
+  exit 127
+fi
+
 run_pytest() {
   local allow_no_tests=0
   if [[ "${1:-}" == "--allow-no-tests" ]]; then
@@ -16,7 +35,7 @@ run_pytest() {
     shift
   fi
   set +e
-  python -m pytest "$@" -o 'addopts=' -q
+  "$PYTHON_BIN" -m pytest "$@" -o 'addopts=' -q
   local status=$?
   set -e
   if [[ $status -eq 5 && $allow_no_tests -eq 1 ]]; then
