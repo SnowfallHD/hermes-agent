@@ -282,10 +282,18 @@ export interface SessionInfo {
   cwd?: null | string
   ended_at: null | number
   id: string
+  /** Stable user-facing conversation id. Compression can rotate raw storage
+   *  sessions, but this id remains the canonical chat/thread handle. */
+  conversation_id?: null | string
+  /** Route/display id for the canonical conversation; normally same as conversation_id. */
+  display_session_id?: null | string
+  /** Latest raw storage session id that should receive resumed/new turns. */
+  latest_session_id?: null | string
   /** Original root id of a compression chain, when this entry is a projected
    *  continuation tip. Stable across compressions — used as the durable id for
    *  pins so a pinned conversation survives auto-compression. */
   _lineage_root_id?: null | string
+  lineage_root_id?: null | string
   input_tokens: number
   is_active: boolean
   last_active: number
@@ -322,7 +330,12 @@ export interface SessionMessage {
 }
 
 export interface SessionMessagesResponse {
+  conversation_id?: string
+  display_session_id?: string
+  latest_session_id?: string
+  lineage_root_id?: string
   messages: SessionMessage[]
+  segment_session_ids?: string[]
   session_id: string
 }
 

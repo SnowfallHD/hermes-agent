@@ -50,6 +50,7 @@ import {
   CRON_SECTION_LIMIT,
   getRecentlySettledSessionIds,
   mergeSessionPage,
+  sessionConversationId,
   sessionPinId,
   setAwaitingResponse,
   setBusy,
@@ -286,13 +287,13 @@ export function DesktopController() {
   // next-run/state fresh as the scheduler advances them.
   const refreshCronJobs = useCallback(async () => {
     try {
-      const jobs = await getCronJobs()
+      const jobs = await getCronJobs(profileScope === ALL_PROFILES ? 'all' : profileScope)
 
       setCronJobs(jobs)
     } catch {
       // Non-fatal: the cron section just keeps its last-known jobs.
     }
-  }, [])
+  }, [profileScope])
 
   const refreshSessions = useCallback(async () => {
     const requestId = refreshSessionsRequestRef.current + 1
@@ -366,7 +367,15 @@ export function DesktopController() {
     }
 
     // Pin on the durable lineage-root id so the pin survives auto-compression.
-    const session = $sessions.get().find(s => s.id === sessionId || s._lineage_root_id === sessionId)
+    const session = $sessions
+      .get()
+      .find(
+        s =>
+          s.id === sessionId ||
+          sessionConversationId(s) === sessionId ||
+          s.latest_session_id === sessionId ||
+          s._lineage_root_id === sessionId
+      )
     const pinId = session ? sessionPinId(session) : sessionId
 
     if ($pinnedSessionIds.get().includes(pinId)) {

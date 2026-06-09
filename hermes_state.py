@@ -1566,6 +1566,99 @@ class SessionDB:
 
         return f"{base} #{max_num + 1}"
 
+    def _is_compression_continuation_locked(self, child_id: str, parent_id: str) -> bool:
+        """Return True when ``child_id`` is the compression continuation of ``parent_id``.
+
+        A session row can have ``parent_session_id`` for several reasons:
+        compression, branches, subagents, and historical gateway/session handoff
+        flows.  Canonical conversations must collapse only the compression edge;
+        branch/delegate children remain independent conversations.
+        """
+        if not child_id or not parent_id:
+            return False
+        conn = self._conn
+        if conn is None:
+            return False
+        row = conn.execute(
+            "SELECT child.started_at AS child_started, parent.ended_at AS parent_ended, "
+            "       parent.end_reason AS parent_end_reason "
+            "FROM sessions child JOIN sessions parent ON parent.id = child.parent_session_id "
+            "WHERE child.id = ? AND parent.id = ?",
+            (child_id, parent_id),
+        ).fetchone()
+        if row is None:
+            return False
+        return (
+            row["parent_end_reason"] == "compression"
+            and row["parent_ended"] is not None
+            and row["child_started"] is not None
+            and row["child_started"] >= row["parent_ended"]
+        )
+
+    def get_compression_root(self, session_id: str) -> Optional[str]:
+        """Walk backward over compression-continuation edges to the root.
+
+        Accepts any raw segment id (root, middle continuation, or tip) and
+        returns the stable canonical conversation id.  Non-compression parents
+        (branches/delegates) stop the walk, so alternate chats do not collapse
+        into their parent.
+        """
+        if not session_id:
+            return session_id
+        current = session_id
+        conn = self._conn
+        if conn is None:
+            return current
+        with self._lock:
+            for _ in range(100):
+                row = conn.execute(
+                    "SELECT parent_session_id FROM sessions WHERE id = ?",
+                    (current,),
+                ).fetchone()
+                if row is None:
+                    return current
+                parent_id = row["parent_session_id"] if hasattr(row, "keys") else row[0]
+                if not parent_id or not self._is_compression_continuation_locked(current, parent_id):
+                    return current
+                current = parent_id
+        return current
+
+    def get_compression_chain(self, session_id: str) -> List[str]:
+        """Return canonical compression chain segment ids from root to tip.
+
+        ``session_id`` may be any segment in the chain.  Existing split rows are
+        therefore projected into one stable transcript without physically moving
+        messages or rewriting historical raw session ids.
+        """
+        root = self.get_compression_root(session_id)
+        if not root:
+            return [session_id] if session_id else []
+        chain = [root]
+        current = root
+        conn = self._conn
+        if conn is None:
+            return chain
+        for _ in range(100):
+            with self._lock:
+                row = conn.execute(
+                    "SELECT id FROM sessions "
+                    "WHERE parent_session_id = ? "
+                    "  AND started_at >= ("
+                    "      SELECT ended_at FROM sessions "
+                    "      WHERE id = ? AND end_reason = 'compression'"
+                    "  ) "
+                    "ORDER BY started_at DESC LIMIT 1",
+                    (current, current),
+                ).fetchone()
+            if row is None:
+                break
+            child_id = row["id"]
+            if child_id in chain:
+                break
+            chain.append(child_id)
+            current = child_id
+        return chain
+
     def get_compression_tip(self, session_id: str) -> Optional[str]:
         """Walk the compression-continuation chain forward and return the tip.
 
@@ -1581,26 +1674,8 @@ class SessionDB:
         input ``session_id`` if it isn't part of a compression chain (or if the
         input itself doesn't exist).
         """
-        current = session_id
-        # Bound the walk defensively — compression chains this deep are
-        # pathological and shouldn't happen in practice. 100 = plenty.
-        for _ in range(100):
-            with self._lock:
-                cursor = self._conn.execute(
-                    "SELECT id FROM sessions "
-                    "WHERE parent_session_id = ? "
-                    "  AND started_at >= ("
-                    "      SELECT ended_at FROM sessions "
-                    "      WHERE id = ? AND end_reason = 'compression'"
-                    "  ) "
-                    "ORDER BY started_at DESC LIMIT 1",
-                    (current, current),
-                )
-                row = cursor.fetchone()
-            if row is None:
-                return current
-            current = row["id"]
-        return current
+        chain = self.get_compression_chain(session_id)
+        return chain[-1] if chain else session_id
 
     def list_sessions_rich(
         self,
@@ -1831,8 +1906,11 @@ class SessionDB:
                     projected.append(s)
                     continue
                 # Preserve the root's started_at for stable sort order, but
-                # surface the tip's identity and activity data.
+                # surface the tip's activity data.  Also expose a canonical
+                # conversation identity so UI clients can keep one durable chat
+                # handle while still knowing which raw storage segment is live.
                 merged = dict(s)
+                root_id = s["id"]
                 for key in (
                     "id", "ended_at", "end_reason", "message_count",
                     "tool_call_count", "title", "last_active", "preview",
@@ -1840,9 +1918,22 @@ class SessionDB:
                 ):
                     if key in tip_row:
                         merged[key] = tip_row[key]
-                merged["_lineage_root_id"] = s["id"]
+                merged["_lineage_root_id"] = root_id
+                merged["lineage_root_id"] = root_id
+                merged["conversation_id"] = root_id
+                merged["display_session_id"] = root_id
+                merged["latest_session_id"] = tip_id
                 projected.append(merged)
             sessions = projected
+
+        if not include_children:
+            for s in sessions:
+                # Uncompressed roots are already canonical; projected compressed
+                # rows above overwrite latest_session_id with the live tip.
+                s.setdefault("lineage_root_id", s.get("_lineage_root_id") or s.get("id"))
+                s.setdefault("conversation_id", s.get("lineage_root_id") or s.get("id"))
+                s.setdefault("display_session_id", s.get("conversation_id") or s.get("id"))
+                s.setdefault("latest_session_id", s.get("id"))
 
         return sessions
 
@@ -2197,19 +2288,84 @@ class SessionDB:
                 (session_id,),
             )
             rows = cursor.fetchall()
-        result = []
-        for row in rows:
-            msg = dict(row)
-            if "content" in msg:
-                msg["content"] = self._decode_content(msg["content"])
-            if msg.get("tool_calls"):
-                try:
-                    msg["tool_calls"] = json.loads(msg["tool_calls"])
-                except (json.JSONDecodeError, TypeError):
-                    logger.warning("Failed to deserialize tool_calls in get_messages, falling back to []")
-                    msg["tool_calls"] = []
-            result.append(msg)
-        return result
+        return [self._hydrate_message_row(row) for row in rows]
+
+    def _hydrate_message_row(self, row) -> Dict[str, Any]:
+        msg = dict(row)
+        if "content" in msg:
+            msg["content"] = self._decode_content(msg["content"])
+        if msg.get("tool_calls"):
+            try:
+                msg["tool_calls"] = json.loads(msg["tool_calls"])
+            except (json.JSONDecodeError, TypeError):
+                logger.warning("Failed to deserialize tool_calls in get_messages, falling back to []")
+                msg["tool_calls"] = []
+        return msg
+
+    def get_conversation_messages(
+        self, session_id: str, include_inactive: bool = False
+    ) -> List[Dict[str, Any]]:
+        """Load the canonical transcript for a compression-split conversation.
+
+        This is the user-facing transcript primitive for Desktop/Web/API reads:
+        callers may pass any raw segment id and receive messages from the
+        compression root through the latest tip. Existing split rows are thus
+        collapsed at read time without destructive DB rewrites. Branch and
+        delegate child sessions are deliberately excluded because only verified
+        compression-continuation edges are followed.
+        """
+        chain = self.get_compression_chain(session_id)
+        if not chain:
+            return []
+        active_clause = "" if include_inactive else " AND active = 1"
+        messages: List[Dict[str, Any]] = []
+        conn = self._conn
+        if conn is None:
+            return messages
+        with self._lock:
+            for sid in chain:
+                rows = conn.execute(
+                    "SELECT * FROM messages WHERE session_id = ?"
+                    f"{active_clause} ORDER BY id",
+                    (sid,),
+                ).fetchall()
+                for row in rows:
+                    msg = self._hydrate_message_row(row)
+                    if self._is_user_facing_compaction_summary(msg):
+                        continue
+                    if self._is_duplicate_replayed_user_message(messages, msg):
+                        continue
+                    messages.append(msg)
+        return messages
+
+    @staticmethod
+    def _is_user_facing_compaction_summary(msg: Dict[str, Any]) -> bool:
+        """Hide synthetic compression summaries from stitched transcripts.
+
+        Compression summaries are real model-visible context and should remain
+        in raw segment storage for debugging/resume fidelity, but Desktop/Web
+        transcript reads should show the user's original scrollback, not the
+        internal compaction marker that seeded a child segment.
+        """
+        if msg.get("role") != "user":
+            return False
+        content = msg.get("content")
+        if not isinstance(content, str):
+            return False
+        return content.startswith("[CONTEXT COMPACTION")
+
+    def get_conversation_metadata(self, session_id: str) -> Dict[str, Any]:
+        """Return stable conversation identity metadata for a raw session id."""
+        chain = self.get_compression_chain(session_id)
+        root_id = chain[0] if chain else session_id
+        tip_id = chain[-1] if chain else session_id
+        return {
+            "conversation_id": root_id,
+            "display_session_id": root_id,
+            "lineage_root_id": root_id,
+            "latest_session_id": tip_id,
+            "segment_session_ids": chain,
+        }
 
     def get_messages_around(
         self,

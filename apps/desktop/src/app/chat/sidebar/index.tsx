@@ -82,6 +82,7 @@ import {
   $sessionsLoading,
   $sessionsTotal,
   $workingSessionIds,
+  sessionConversationId,
   sessionPinId
 } from '@/store/session'
 
@@ -201,12 +202,18 @@ const baseName = (path: string) =>
 function searchResultToSession(result: SessionSearchResult): SessionInfo {
   const ts = result.session_started ?? Date.now() / 1000
 
+  const conversationId = result.lineage_root ?? result.session_id
+
   return {
     archived: false,
     cwd: null,
     ended_at: null,
     id: result.session_id,
+    conversation_id: conversationId,
+    display_session_id: conversationId,
+    latest_session_id: result.session_id,
     _lineage_root_id: result.lineage_root ?? null,
+    lineage_root_id: conversationId,
     input_tokens: 0,
     is_active: false,
     last_active: ts,
@@ -240,11 +247,11 @@ function workspaceGroupsFor(
 
   if (!options.preserveSessionOrder) {
     // Groups keep recency order (Map insertion = first-seen in the recency-sorted
-    // input, so an active project floats up), but rows *within* a group sort by
-    // creation time so they don't reshuffle every time a message lands — keeps
-    // muscle memory intact.
+    // input), and rows within each group should behave like ChatGPT/Linear-style
+    // recents too: newest activity first. Creation-time sorting made an active
+    // older chat look stale after every refresh.
     for (const group of groups.values()) {
-      group.sessions.sort((a, b) => b.started_at - a.started_at)
+      group.sessions.sort((a, b) => sessionTime(b) - sessionTime(a))
     }
   }
 
@@ -429,8 +436,10 @@ export function ChatSidebar({
     for (const s of [...cronSessions, ...visibleSessions]) {
       map.set(s.id, s)
 
-      if (s._lineage_root_id && !map.has(s._lineage_root_id)) {
-        map.set(s._lineage_root_id, s)
+      for (const id of [s._lineage_root_id, s.lineage_root_id, s.conversation_id, s.display_session_id, s.latest_session_id]) {
+        if (id && !map.has(id)) {
+          map.set(id, s)
+        }
       }
     }
 
@@ -514,20 +523,17 @@ export function ChatSidebar({
   )
 
   useEffect(() => {
-    const next = reconcileOrderIds(
-      unpinnedAgentSessions.map(s => s.id),
-      agentOrderIds
-    )
+    // Recents should be the source of truth, like ChatGPT: each refresh promotes
+    // the latest-used conversation. Older persisted drag/drop order must not pin
+    // stale sessions above newly-active chats.
+    const next = unpinnedAgentSessions.map(s => s.id)
 
     if (!sameIds(next, agentOrderIds)) {
       setSidebarSessionOrderIds(next)
     }
   }, [agentOrderIds, unpinnedAgentSessions])
 
-  const agentSessions = useMemo(
-    () => orderByIds(unpinnedAgentSessions, s => s.id, agentOrderIds),
-    [unpinnedAgentSessions, agentOrderIds]
-  )
+  const agentSessions: SessionInfo[] = unpinnedAgentSessions
 
   const { localSessions: localAgentSessions, sourceGroups } = useMemo(
     () => sourceSessionGroupsFor(agentSessions),
@@ -716,7 +722,7 @@ export function ChatSidebar({
         return
       }
 
-      setSidebarWorkspaceOrderIds(arrayMove(groups, oldIdx, newIdx).map(g => g.id))
+      setSidebarWorkspaceOrderIds(arrayMove(groups, oldIdx, newIdx).map((g: SidebarSessionGroup) => g.id))
 
       return
     }
@@ -732,7 +738,7 @@ export function ChatSidebar({
       return
     }
 
-    setSidebarSessionOrderIds(arrayMove(agentSessions, oldIdx, newIdx).map(s => s.id))
+    setSidebarSessionOrderIds(arrayMove(agentSessions, oldIdx, newIdx).map((s: SessionInfo) => s.id))
   }
 
   return (
@@ -1100,14 +1106,15 @@ function SidebarSessionsSection({
   const dndActive = sortable && !!onReorder
 
   const renderRow = (session: SessionInfo) => {
+    const conversationId = sessionConversationId(session)
     const rowProps = {
       isPinned: pinned,
-      isSelected: session.id === activeSessionId,
-      isWorking: workingSessionIdSet.has(session.id),
-      onArchive: () => onArchiveSession(session.id),
-      onDelete: () => onDeleteSession(session.id),
+      isSelected: conversationId === activeSessionId || session.id === activeSessionId,
+      isWorking: workingSessionIdSet.has(conversationId) || workingSessionIdSet.has(session.id),
+      onArchive: () => onArchiveSession(conversationId),
+      onDelete: () => onDeleteSession(conversationId),
       onPin: () => onTogglePin(sessionPinId(session)),
-      onResume: () => onResumeSession(session.id),
+      onResume: () => onResumeSession(conversationId),
       session
     }
 

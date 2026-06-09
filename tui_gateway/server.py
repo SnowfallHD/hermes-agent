@@ -3477,6 +3477,14 @@ def _(rid, params: dict) -> dict:
             target = found["id"]
         else:
             return _err(rid, 4007, "session not found")
+    # Raw storage rows may be split by compression; the desktop/browser route may
+    # use the stable root conversation id. Rebind execution to the latest live
+    # segment so new turns append to the canonical tip instead of reopening the
+    # dead compression parent and creating another visible fork.
+    try:
+        target = db.get_conversation_metadata(target)["latest_session_id"]
+    except Exception:
+        pass
     # Fast path: if the session is already live, reuse it under the lock.
     with _session_resume_lock:
         live = _find_live_session_by_key(target)

@@ -24,8 +24,15 @@ function updateAtom<T>(store: AppAtom<T>, next: Updater<T>) {
 /** Durable id for pinning. Auto-compression rotates a conversation's session
  *  id (root -> continuation tip), so pins keyed on the live id evaporate. The
  *  lineage root is stable across every compression, so we pin on that. */
-export const sessionPinId = (session: Pick<SessionInfo, '_lineage_root_id' | 'id'>): string =>
-  session._lineage_root_id ?? session.id
+export const sessionPinId = (session: Pick<SessionInfo, '_lineage_root_id' | 'conversation_id' | 'id'>): string =>
+  session.conversation_id ?? session._lineage_root_id ?? session.id
+
+/** Stable user-facing id for routing/resume. Compression may rotate the raw
+ * live session id, but the route should continue to name the canonical
+ * conversation root so Desktop/Web do not appear to split chats. */
+export const sessionConversationId = (
+  session: Pick<SessionInfo, 'conversation_id' | 'display_session_id' | '_lineage_root_id' | 'id'>
+): string => session.display_session_id ?? session.conversation_id ?? session._lineage_root_id ?? session.id
 
 /** Merge a fresh server session page into the in-memory list, keeping any
  *  row the server omitted that we still want visible — both still-"working"

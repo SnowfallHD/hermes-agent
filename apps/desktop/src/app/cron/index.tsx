@@ -34,6 +34,7 @@ import { AlertTriangle, Clock } from '@/lib/icons'
 import { cn } from '@/lib/utils'
 import { $cronFocusJobId, $cronJobs, setCronFocusJobId, setCronJobs, updateCronJobs } from '@/store/cron'
 import { notify, notifyError } from '@/store/notifications'
+import { $profileScope, ALL_PROFILES } from '@/store/profile'
 
 import { useRefreshHotkey } from '../hooks/use-refresh-hotkey'
 import { OverlayMain, OverlayNewButton, OverlaySidebar, OverlaySplitLayout } from '../overlays/overlay-split-layout'
@@ -251,6 +252,7 @@ export function CronView({ onClose, onOpenSession, setStatusbarItemGroup: _setSt
   // sidebar and this overlay never drift — a delete here clears the sidebar row
   // immediately. `loading` only gates the first paint before the atom is filled.
   const jobs = useStore($cronJobs)
+  const profileScope = useStore($profileScope)
   const [loading, setLoading] = useState(jobs.length === 0)
   const [query, setQuery] = useState('')
   const [busyJobId, setBusyJobId] = useState<null | string>(null)
@@ -267,13 +269,13 @@ export function CronView({ onClose, onOpenSession, setStatusbarItemGroup: _setSt
 
   const refresh = useCallback(async () => {
     try {
-      setCronJobs(await getCronJobs())
+      setCronJobs(await getCronJobs(profileScope === ALL_PROFILES ? 'all' : profileScope))
     } catch (err) {
       notifyError(err, c.failedLoad)
     } finally {
       setLoading(false)
     }
-  }, [c])
+  }, [c, profileScope])
 
   useRefreshHotkey(refresh)
 

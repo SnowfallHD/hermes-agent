@@ -15,6 +15,7 @@ import { clearNotifications, notify, notifyError } from '@/store/notifications'
 import { requestDesktopOnboarding } from '@/store/onboarding'
 import { $activeGatewayProfile, $newChatProfile, ensureGatewayProfile, normalizeProfileKey } from '@/store/profile'
 import {
+  sessionConversationId,
   $currentCwd,
   $messages,
   $sessions,
@@ -442,7 +443,13 @@ export function useSessionActions({
 
       // Swap the single live gateway to this session's profile before any
       // gateway call (no-op when it's already on that profile / single-profile).
-      const storedForProfile = $sessions.get().find(session => session.id === storedSessionId)
+      const matchesStoredSessionId = (session: SessionInfo) =>
+        session.id === storedSessionId ||
+        sessionConversationId(session) === storedSessionId ||
+        session.latest_session_id === storedSessionId ||
+        session._lineage_root_id === storedSessionId
+
+      const storedForProfile = $sessions.get().find(matchesStoredSessionId)
       const sessionProfile = storedForProfile?.profile
       await ensureGatewayProfile(sessionProfile)
 
@@ -500,7 +507,7 @@ export function useSessionActions({
       setSelectedStoredSessionId(storedSessionId)
       selectedStoredSessionIdRef.current = storedSessionId
       setSessionStartedAt(Date.now())
-      const stored = $sessions.get().find(session => session.id === storedSessionId)
+      const stored = $sessions.get().find(matchesStoredSessionId)
 
       if (stored) {
         setCurrentUsage(current => ({

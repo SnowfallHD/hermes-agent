@@ -638,9 +638,9 @@ class TestWebServerEndpoints:
             for r in results
         )
 
-    def test_get_session_messages_follows_compression_tip(self):
-        """Reading a compressed session by its old id should hydrate from the
-        live continuation, matching /resume behavior."""
+    def test_get_session_messages_returns_canonical_compression_conversation(self):
+        """Reading a compressed session by root or tip should hydrate the one
+        canonical user-facing conversation, with metadata hiding raw splits."""
         import time as _time
 
         from hermes_state import SessionDB
@@ -657,17 +657,24 @@ class TestWebServerEndpoints:
             )
             db.create_session(session_id="desktop-tip", source="cli", parent_session_id="desktop-root")
             db._conn.execute("UPDATE sessions SET started_at = ? WHERE id = ?", (now - 4, "desktop-tip"))
-            db.replace_messages("desktop-root", [])
             db.append_message(session_id="desktop-tip", role="user", content="after compression")
             db._conn.commit()
         finally:
             db.close()
 
-        resp = self.client.get("/api/sessions/desktop-root/messages")
-        assert resp.status_code == 200
-        payload = resp.json()
-        assert payload["session_id"] == "desktop-tip"
-        assert [m["content"] for m in payload["messages"]] == ["after compression"]
+        for routed_id in ("desktop-root", "desktop-tip"):
+            resp = self.client.get(f"/api/sessions/{routed_id}/messages")
+            assert resp.status_code == 200
+            payload = resp.json()
+            assert payload["session_id"] == "desktop-tip"
+            assert payload["conversation_id"] == "desktop-root"
+            assert payload["display_session_id"] == "desktop-root"
+            assert payload["latest_session_id"] == "desktop-tip"
+            assert payload["segment_session_ids"] == ["desktop-root", "desktop-tip"]
+            assert [m["content"] for m in payload["messages"]] == [
+                "before compression",
+                "after compression",
+            ]
 
     def test_get_sessions_archived_is_boolean(self):
         from hermes_state import SessionDB

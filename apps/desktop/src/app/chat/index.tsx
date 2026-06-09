@@ -38,6 +38,7 @@ import {
   $messages,
   $selectedStoredSessionId,
   $sessions,
+  sessionConversationId,
   sessionPinId
 } from '@/store/session'
 import type { ModelOptionsResponse } from '@/types/hermes'
@@ -102,7 +103,13 @@ function ChatHeader({
   const pinnedSessionIds = useStore($pinnedSessionIds)
 
   const activeStoredSession =
-    sessions.find(session => session.id === selectedSessionId || session._lineage_root_id === selectedSessionId) || null
+    sessions.find(
+      session =>
+        session.id === selectedSessionId ||
+        sessionConversationId(session) === selectedSessionId ||
+        session.latest_session_id === selectedSessionId ||
+        session._lineage_root_id === selectedSessionId
+    ) || null
 
   const title = activeStoredSession ? sessionTitle(activeStoredSession) : 'New session'
 

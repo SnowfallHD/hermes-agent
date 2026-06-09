@@ -2936,6 +2936,81 @@ class TestCompressionChainProjection:
         assert tip_row["_lineage_root_id"] == "root1"
         assert tip_row["cwd"] == "/tmp/workspaces/tip"
 
+    def test_projected_list_row_exposes_stable_conversation_identity(self, db):
+        """Compression should not make Desktop/Web treat the tip as a new chat.
+
+        The raw live session id can still be exposed for resume/debug, but the
+        surfaced conversation id must remain the root id so existing split
+        continuation rows collapse into one canonical thread.
+        """
+        import time as _time
+
+        self._build_compression_chain(db, _time.time() - 3600)
+        sessions = db.list_sessions_rich(source="cli", limit=20)
+        tip_row = next(s for s in sessions if s["id"] == "tip1")
+
+        assert tip_row["conversation_id"] == "root1"
+        assert tip_row["display_session_id"] == "root1"
+        assert tip_row["latest_session_id"] == "tip1"
+        assert tip_row["lineage_root_id"] == "root1"
+        assert tip_row["_lineage_root_id"] == "root1"
+
+    def test_get_conversation_messages_stitches_existing_compression_splits(self, db):
+        """Reading either root, middle, or tip returns one canonical transcript."""
+        import time as _time
+
+        self._build_compression_chain(db, _time.time() - 3600)
+
+        from_root = db.get_conversation_messages("root1")
+        from_mid = db.get_conversation_messages("mid1")
+        from_tip = db.get_conversation_messages("tip1")
+
+        assert [m["content"] for m in from_root] == [
+            "help me refactor auth",
+            "continuing",
+            "latest message",
+        ]
+        assert [m["session_id"] for m in from_root] == ["root1", "mid1", "tip1"]
+        assert from_mid == from_root
+        assert from_tip == from_root
+
+    def test_get_conversation_messages_hides_compaction_summary_marker(self, db):
+        """Stitched user-facing transcript must not leak internal summaries.
+
+        Compression persists the model-visible compaction summary at the start
+        of the child segment so resume/debug can reconstruct context. Desktop
+        and Web should instead show the original user/assistant transcript
+        stitched across segments, with that synthetic marker filtered out.
+        """
+        import time as _time
+
+        self._build_compression_chain(db, _time.time() - 3600)
+        db.append_message("mid1", "user", "[CONTEXT COMPACTION — REFERENCE ONLY] Earlier turns were compacted")
+        db.append_message("tip1", "user", "[CONTEXT COMPACTION] Summary of work...")
+        db._conn.commit()
+
+        messages = db.get_conversation_messages("root1")
+        contents = [m["content"] for m in messages]
+
+        assert contents == [
+            "help me refactor auth",
+            "continuing",
+            "latest message",
+        ]
+        # Raw segment reads remain available for debug/provenance.
+        assert any(
+            str(m["content"]).startswith("[CONTEXT COMPACTION")
+            for m in db.get_messages("mid1") + db.get_messages("tip1")
+        )
+
+    def test_get_conversation_messages_does_not_include_delegate_children(self, db):
+        import time as _time
+
+        self._build_compression_chain(db, _time.time() - 3600)
+        messages = db.get_conversation_messages("root1")
+
+        assert "delegate task" not in [m["content"] for m in messages]
+
     def test_list_without_projection_returns_raw_root(self, db):
         """project_compression_tips=False returns the raw parent-NULL root
         rows — useful for admin/debug UIs.

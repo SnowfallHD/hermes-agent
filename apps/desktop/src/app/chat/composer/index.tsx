@@ -40,6 +40,7 @@ import {
   shouldAutoDrainOnSettle,
   updateQueuedPrompt
 } from '@/store/composer-queue'
+import { $activeGatewayProfile, normalizeProfileKey } from '@/store/profile'
 import { $gatewayState, $messages } from '@/store/session'
 import { $threadScrolledUp } from '@/store/thread-scroll'
 
@@ -104,6 +105,59 @@ interface QueueEditState {
 
 const cloneAttachments = (attachments: ComposerAttachment[]) => attachments.map(a => ({ ...a }))
 
+const COMPOSER_DRAFT_STORAGE_PREFIX = 'hermes.desktop.composerDraft.v1'
+
+interface PersistedComposerDraft {
+  attachments: ComposerAttachment[]
+  text: string
+}
+
+function composerDraftStorageKey(sessionKey: null | string, profile: string): string {
+  return `${COMPOSER_DRAFT_STORAGE_PREFIX}:${normalizeProfileKey(profile)}:${sessionKey || 'new'}`
+}
+
+function storageSafeAttachments(attachments: ComposerAttachment[]): ComposerAttachment[] {
+  return attachments.map(({ attachedSessionId: _attachedSessionId, previewUrl: _previewUrl, ...attachment }) => ({
+    ...attachment
+  }))
+}
+
+function readPersistedComposerDraft(key: string): PersistedComposerDraft {
+  try {
+    const raw = window.localStorage.getItem(key)
+
+    if (!raw) {
+      return { attachments: [], text: '' }
+    }
+
+    const parsed = JSON.parse(raw) as Partial<PersistedComposerDraft>
+    const text = typeof parsed.text === 'string' ? parsed.text : ''
+    const attachments = Array.isArray(parsed.attachments)
+      ? parsed.attachments.filter((item): item is ComposerAttachment => Boolean(item && typeof item === 'object'))
+      : []
+
+    return { attachments, text }
+  } catch {
+    return { attachments: [], text: '' }
+  }
+}
+
+function writePersistedComposerDraft(key: string, text: string, attachments: ComposerAttachment[]) {
+  try {
+    const safeAttachments = storageSafeAttachments(attachments)
+
+    if (!text.trim() && safeAttachments.length === 0) {
+      window.localStorage.removeItem(key)
+
+      return
+    }
+
+    window.localStorage.setItem(key, JSON.stringify({ attachments: safeAttachments, text }))
+  } catch {
+    // localStorage may be unavailable/full; composer still works normally.
+  }
+}
+
 export function ChatBar({
   busy,
   cwd,
@@ -130,10 +184,15 @@ export function ChatBar({
   const aui = useAui()
   const draft = useAuiState(s => s.composer.text)
   const attachments = useStore($composerAttachments)
+  const activeGatewayProfile = useStore($activeGatewayProfile)
   const queuedPromptsBySession = useStore($queuedPromptsBySession)
   const scrolledUp = useStore($threadScrolledUp)
   const sessionMessages = useStore($messages)
   const activeQueueSessionKey = queueSessionKey || sessionId || null
+  const draftStorageKey = useMemo(
+    () => composerDraftStorageKey(activeQueueSessionKey, activeGatewayProfile),
+    [activeGatewayProfile, activeQueueSessionKey]
+  )
 
   const queuedPrompts = useMemo(
     () => (activeQueueSessionKey ? (queuedPromptsBySession[activeQueueSessionKey] ?? []) : []),
@@ -146,6 +205,7 @@ export function ChatBar({
   const draftRef = useRef(draft)
   const previousBusyRef = useRef(busy)
   const drainingQueueRef = useRef(false)
+  const skipNextDraftPersistRef = useRef(false)
   const urlInputRef = useRef<HTMLInputElement | null>(null)
 
   const [urlOpen, setUrlOpen] = useState(false)
@@ -994,6 +1054,23 @@ export function ChatBar({
       placeCaretEnd(editor)
     }
   }
+
+  useEffect(() => {
+    const restored = readPersistedComposerDraft(draftStorageKey)
+
+    skipNextDraftPersistRef.current = true
+    loadIntoComposer(restored.text, restored.attachments)
+  }, [draftStorageKey]) // eslint-disable-line react-hooks/exhaustive-deps
+
+  useEffect(() => {
+    if (skipNextDraftPersistRef.current) {
+      skipNextDraftPersistRef.current = false
+
+      return
+    }
+
+    writePersistedComposerDraft(draftStorageKey, draft, attachments)
+  }, [attachments, draft, draftStorageKey])
 
   const beginQueuedEdit = (entry: QueuedPromptEntry) => {
     if (!activeQueueSessionKey || queueEdit) {
