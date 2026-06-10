@@ -49,6 +49,50 @@ def kanban_home(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> Path:
 
 
 # ---------------------------------------------------------------------------
+# Initial approval gates created as blocked must be sticky
+# ---------------------------------------------------------------------------
+
+
+def test_initial_blocked_approval_gate_is_not_auto_promoted_or_spawned(kanban_home: Path) -> None:
+    """A task born blocked is an approval gate, not a ready task.
+
+    Before the sticky event fix, create_task(initial_status='blocked') emitted
+    only a created event.  recompute_ready() then treated it like a recoverable
+    transient block and promoted it on the next dispatcher tick.
+    """
+    with kb.connect() as conn:
+        tid = kb.create_task(conn, title="approval gate", initial_status="blocked")
+
+        events = conn.execute(
+            "SELECT kind, payload FROM task_events WHERE task_id=? ORDER BY created_at, id",
+            (tid,),
+        ).fetchall()
+        assert [row["kind"] for row in events] == ["created", "blocked"]
+        assert "initial_status:blocked" in (events[-1]["payload"] or "")
+
+        for _ in range(5):
+            assert kb.recompute_ready(conn) == 0
+            task = kb.get_task(conn, tid)
+            assert task is not None
+            assert task.status == "blocked"
+
+
+def test_initial_blocked_approval_gate_can_still_be_explicitly_unblocked(kanban_home: Path) -> None:
+    """Sticky approval gates are not permanent; explicit unblock is the escape."""
+    with kb.connect() as conn:
+        tid = kb.create_task(conn, title="approval gate", initial_status="blocked")
+        assert kb.unblock_task(conn, tid)
+        task = kb.get_task(conn, tid)
+        assert task is not None
+        assert task.status == "ready"
+
+        assert kb.recompute_ready(conn) == 0
+        task = kb.get_task(conn, tid)
+        assert task is not None
+        assert task.status == "ready"
+
+
+# ---------------------------------------------------------------------------
 # Worker-initiated kanban_block must be sticky
 # ---------------------------------------------------------------------------
 

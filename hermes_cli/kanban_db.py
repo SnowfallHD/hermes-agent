@@ -2280,6 +2280,19 @@ def create_task(
                         "goal_mode": bool(goal_mode) or None,
                     },
                 )
+                if task_status == "blocked":
+                    # ``recompute_ready`` treats a task as sticky-blocked only
+                    # when the latest block/unblock lifecycle event is
+                    # ``blocked``.  Approval gates created directly with
+                    # ``initial_status='blocked'`` need the same event as an
+                    # explicit ``kanban block`` call, otherwise the live
+                    # dispatcher can immediately promote/claim/spawn them.
+                    _append_event(
+                        conn,
+                        task_id,
+                        "blocked",
+                        {"reason": "initial_status:blocked"},
+                    )
             return task_id
         except sqlite3.IntegrityError:
             if attempt == 1:
