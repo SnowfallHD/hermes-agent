@@ -98,6 +98,88 @@ def test_action_template_compressor_aggregates_low_info_entries_but_preserves_hi
     assert any(entry.get("id") == "mind:revenue" for entry in compressed)
 
 
+def test_worker_liveness_compressor_drops_repeated_pid_not_alive_templates_but_keeps_real_signals():
+    mod = _load_plugin_module()
+    pid_rows = [
+        {
+            "id": f"kanban:{i}",
+            "event_seq": i,
+            "created_at": 1000 + i,
+            "source": "kanban",
+            "kind": "crashed",
+            "event_type": "risk_signal",
+            "category": "decision",
+            "summary": f"Task {i} failed during execution. Detail: pid {3000 + i} not alive",
+            "thought": f"Task {i} failed during execution. Detail: pid {3000 + i} not alive",
+            "why_it_matters": "Execution failures require recovery judgment before more autonomous churn accumulates.",
+            "evidence_refs": [f"kanban-event:{i}", f"kanban-task:t_pid{i}"],
+            "task_id": f"t_pid{i}",
+            "next_best_action": "retry",
+            "autonomy_quality": "failed_recovery_needed",
+        }
+        for i in range(5)
+    ]
+    preserved = [
+        {
+            "id": "kanban:review",
+            "event_seq": 20,
+            "created_at": 2000,
+            "source": "kanban",
+            "kind": "blocked",
+            "event_type": "decision_signal",
+            "category": "decision",
+            "summary": "review-required: local branch needs reviewer eyes",
+            "thought": "review-required: local branch needs reviewer eyes",
+            "evidence_refs": ["kanban-event:20"],
+            "next_best_action": "escalate",
+        },
+        {
+            "id": "kanban:traceback",
+            "event_seq": 21,
+            "created_at": 2001,
+            "source": "kanban",
+            "kind": "crashed",
+            "event_type": "risk_signal",
+            "category": "decision",
+            "summary": "Task failed during execution. Detail: Traceback: boom",
+            "thought": "Task failed during execution. Detail: Traceback: boom",
+            "evidence_refs": ["kanban-event:21"],
+            "next_best_action": "retry",
+        },
+        {
+            "id": "mind:revenue",
+            "event_seq": 22,
+            "created_at": 2002,
+            "source": "cron",
+            "kind": "revenue_signal",
+            "event_type": "revenue_signal",
+            "category": "revenue",
+            "summary": "Revenue signal for $50k MRR.",
+            "thought": "Revenue signal for $50k MRR.",
+            "evidence_refs": ["market:1"],
+            "next_best_action": "create_task",
+        },
+    ]
+    before_count = sum("not alive" in entry["summary"] for entry in pid_rows + preserved)
+
+    compressed, meta = mod._compress_repeated_worker_liveness_failures(pid_rows + preserved, min_count=3)
+    after_count = sum("not alive" in entry["summary"] for entry in compressed)
+
+    assert before_count == 5
+    assert after_count == 1
+    assert len(meta) == 1
+    aggregate = meta[0]
+    assert aggregate["event_type"] == "risk_signal"
+    assert aggregate["urgency"] == "needs_review"
+    assert aggregate["next_best_action"] == "retry"
+    assert aggregate["counts"] == {"total": 5, "template": "pid_not_alive_worker_outcome", "tasks": 5}
+    assert aggregate["tasks"] == ["t_pid0", "t_pid1", "t_pid2", "t_pid3", "t_pid4"]
+    assert not any(entry.get("id") == "kanban:0" for entry in compressed)
+    assert any(entry.get("id") == "kanban:review" for entry in compressed)
+    assert any(entry.get("id") == "kanban:traceback" for entry in compressed)
+    assert any(entry.get("id") == "mind:revenue" for entry in compressed)
+
+
 @pytest.fixture
 def kanban_home(tmp_path, monkeypatch):
     home = tmp_path / ".hermes"

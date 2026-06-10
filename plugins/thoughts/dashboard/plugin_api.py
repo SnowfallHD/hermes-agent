@@ -106,7 +106,13 @@ def _reason(payload: dict[str, Any], *keys: str) -> str:
 
 
 def _summary_snippet(row: sqlite3.Row, payload: dict[str, Any]) -> str:
-    return _reason(payload, "summary", "result", "message", "reason", "error") or _clean_text(row["run_summary"], limit=140)
+    run_error = ""
+    try:
+        if "run_error" in row.keys():
+            run_error = _clean_text(row["run_error"], limit=140)
+    except Exception:
+        run_error = ""
+    return _reason(payload, "summary", "result", "message", "reason", "error") or _clean_text(row["run_summary"], limit=140) or run_error
 
 
 def _thought_for_event(row: sqlite3.Row) -> str:
@@ -310,13 +316,100 @@ def _action_template_signature(entry: dict[str, Any]) -> str:
     return f"{source}:{kind or event_type}:{summary}"
 
 
+_PID_NOT_ALIVE_RE = re.compile(r"\bpid\s+\d+\s+not\s+alive\b", re.I)
+
+
+def _looks_like_pid_not_alive_worker_failure(entry: dict[str, Any]) -> bool:
+    """True for the low-information worker-liveness crash template.
+
+    ``pid N not alive`` is useful evidence that the dispatcher observed a dead
+    worker process, but repeated copies usually say more about a systemic worker
+    launch/recovery loop than about each task's substance. Other failure types
+    remain individual high-signal entries.
+    """
+    if _clean_text(entry.get("source"), limit=80) != "kanban":
+        return False
+    if _clean_text(entry.get("kind"), limit=80) not in {"crashed", "gave_up"}:
+        return False
+    text = " ".join(
+        _clean_text(entry.get(field), limit=280)
+        for field in ("summary", "thought", "why_it_matters")
+    )
+    metadata = entry.get("metadata") if isinstance(entry.get("metadata"), dict) else {}
+    if metadata:
+        text = " ".join([text, *[str(value) for value in metadata.values() if isinstance(value, (str, int, float))]])
+    return bool(_PID_NOT_ALIVE_RE.search(text))
+
+
+def _compress_repeated_worker_liveness_failures(entries: list[dict[str, Any]], *, min_count: int = 3) -> tuple[list[dict[str, Any]], list[dict[str, Any]]]:
+    """Aggregate repeated ``pid N not alive`` worker outcomes into one signal.
+
+    This keeps crash evidence visible as a risk/recovery signal while dropping
+    noisy per-task template repeats from the main feed. Approval/review blockers,
+    revenue signals, protocol violations, nonzero exits, timeouts, and tracebacks
+    pass through untouched.
+    """
+    matches = [entry for entry in entries if _looks_like_pid_not_alive_worker_failure(entry)]
+    if len(matches) < min_count:
+        return entries, []
+
+    match_ids = {str(entry.get("id", "")) for entry in matches}
+    rows = sorted(matches, key=lambda row: (_entry_time(row), str(row.get("id", ""))))
+    refs: list[str] = []
+    tasks: list[str] = []
+    for row in rows:
+        task_id = _clean_text(row.get("task_id"), limit=80)
+        if task_id and task_id not in tasks:
+            tasks.append(task_id)
+        for ref in row.get("evidence_refs") or []:
+            text = _clean_ref(ref)
+            if text and text not in refs:
+                refs.append(text)
+            if len(refs) >= 12:
+                break
+        if len(refs) >= 12:
+            break
+    if not refs:
+        refs = [f"kanban-task:{task_id}" for task_id in tasks[:12]]
+    start = _entry_time(rows[0])
+    end = _entry_time(rows[-1])
+    thought = f"Compressed {len(rows)} repeated worker liveness crash templates (`pid # not alive`) into one systemic recovery signal."
+    aggregate = {
+        "id": f"compressed-worker-liveness:{int(start)}:{int(end)}:{len(rows)}",
+        "event_seq": int(max((entry.get("event_seq") or 0) for entry in rows)),
+        "created_at": end,
+        "source": "worker_liveness_failure_compressor",
+        "kind": "compressed_worker_liveness_failure",
+        "event_type": "risk_signal",
+        "category": "decision",
+        "thought": thought,
+        "summary": thought,
+        "why_it_matters": "Repeated dead-worker liveness rows are real crash evidence, but the duplicate template is lower-information than one systemic recovery signal with task/event refs.",
+        "window": {"start": start, "end": end, "seconds": int(max(0, end - start))},
+        "counts": {"total": len(rows), "template": "pid_not_alive_worker_outcome", "tasks": len(tasks)},
+        "tasks": tasks[:20],
+        "metadata": {"related_task_id": tasks[0] if tasks else None, "related_task_ids": tasks[:20]},
+        "representative_evidence_refs": refs,
+        "evidence_refs": refs,
+        "confidence_label": "high",
+        "urgency": "needs_review",
+        "autonomy_quality": "failed_recovery_needed",
+        "next_best_action": "retry",
+        "raw_chain_of_thought": False,
+    }
+    out = [entry for entry in entries if str(entry.get("id", "")) not in match_ids]
+    out.append(aggregate)
+    out.sort(key=lambda entry: (_entry_time(entry), str(entry.get("id", ""))))
+    return out, [aggregate]
+
+
 def _compress_repeated_low_information_actions(entries: list[dict[str, Any]], *, min_count: int = 3) -> tuple[list[dict[str, Any]], list[dict[str, Any]]]:
     buckets: dict[str, list[dict[str, Any]]] = {}
     passthrough: list[dict[str, Any]] = []
     compressible_sources = {"kanban", "session_action_reducer", "material_action_reducer"}
     for entry in entries:
         source = _clean_text(entry.get("source"), limit=80)
-        if source not in compressible_sources or _is_high_signal_entry(entry):
+        if source not in compressible_sources or _looks_like_pid_not_alive_worker_failure(entry) or _is_high_signal_entry(entry):
             passthrough.append(entry)
             continue
         signature = _action_template_signature(entry)
@@ -766,7 +859,7 @@ def _churn_meta_entries(conn: sqlite3.Connection, *, board: str, limit: int) -> 
         SELECT
             e.id, e.task_id, e.kind, e.payload, e.created_at,
             t.title, t.assignee, t.status,
-            r.profile AS run_profile, r.summary AS run_summary
+            r.profile AS run_profile, r.summary AS run_summary, r.error AS run_error
         FROM task_events e
         LEFT JOIN tasks t ON t.id = e.task_id
         LEFT JOIN task_runs r ON r.id = e.run_id
@@ -848,7 +941,8 @@ def _query_entries(
                 t.assignee,
                 t.status,
                 r.profile AS run_profile,
-                r.summary AS run_summary
+                r.summary AS run_summary,
+                r.error AS run_error
             FROM task_events e
             LEFT JOIN tasks t ON t.id = e.task_id
             LEFT JOIN task_runs r ON r.id = e.run_id
@@ -865,11 +959,14 @@ def _query_entries(
         action_entries = _session_action_reducer(include_all_profiles=include_all_profiles, limit=limit) if session_actions else []
         material_entries = material_action_reducer(include_all_profiles=include_all_profiles, limit=limit)
         entries = _merge_entries(entries, mind_entries, churn_entries, action_entries, material_entries, limit=limit)
+        entries, compressed_liveness_entries = _compress_repeated_worker_liveness_failures(entries)
         entries, compressed_action_entries = _compress_repeated_low_information_actions(entries)
         entries = _validate_cognition_entries(entries[-limit:])
         for entry in entries:
             if entry.get("source") == "repeated_action_template_compressor":
                 entry.setdefault("compression_meta_events", len(compressed_action_entries))
+            if entry.get("source") == "worker_liveness_failure_compressor":
+                entry.setdefault("compression_meta_events", len(compressed_liveness_entries))
         latest = conn.execute("SELECT COALESCE(MAX(id), 0) FROM task_events").fetchone()[0]
         return entries, int(latest or 0), active_board, mind_ledger
     finally:
