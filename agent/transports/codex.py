@@ -218,6 +218,13 @@ class ResponsesApiTransport(ProviderTransport):
             kwargs.pop("timeout", None)
 
         if is_codex_backend:
+            # Native ChatGPT Codex backend rejects sampling controls on the
+            # Responses endpoint (HTTP 400 "Unsupported parameter:
+            # temperature"). Other Responses-compatible providers may accept
+            # it, so strip only after request_overrides have been merged and
+            # only for this backend.
+            kwargs.pop("temperature", None)
+
             prompt_cache_key = kwargs.get("prompt_cache_key")
             cache_scope_id = str(prompt_cache_key or session_id or "").strip()
             if cache_scope_id:

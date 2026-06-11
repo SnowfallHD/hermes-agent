@@ -515,6 +515,52 @@ class TestCodexTransportTimeout:
         assert kw.get("timeout") == 450.0
 
 
+class TestCodexTransportCodexBackendTemperatureStrip:
+    """chatgpt.com/backend-api/codex rejects ``temperature``.
+
+    The generic Responses preflight intentionally preserves temperature for
+    Responses-compatible providers, but the native ``openai-codex`` backend
+    returns HTTP 400 ``Unsupported parameter: temperature`` when the field
+    leaks through request overrides (for example from fallback/compression
+    paths used by cron jobs).  Mirror the existing Codex max_output_tokens
+    guard and strip this only for the native Codex backend.
+    """
+
+    @pytest.fixture
+    def transport(self):
+        from agent.transports.codex import ResponsesApiTransport
+        return ResponsesApiTransport()
+
+    def test_codex_backend_strips_temperature_from_request_overrides(self, transport):
+        kw = transport.build_kwargs(
+            model="gpt-5.5",
+            messages=[{"role": "user", "content": "hi"}],
+            tools=[],
+            is_codex_backend=True,
+            request_overrides={"temperature": 0.7},
+        )
+        assert "temperature" not in kw
+
+    def test_codex_backend_strips_direct_temperature(self, transport):
+        kw = transport.build_kwargs(
+            model="gpt-5.5",
+            messages=[{"role": "user", "content": "hi"}],
+            tools=[],
+            is_codex_backend=True,
+            temperature=0.7,
+        )
+        assert "temperature" not in kw
+
+    def test_non_codex_backend_preserves_temperature(self, transport):
+        kw = transport.build_kwargs(
+            model="gpt-5.5",
+            messages=[{"role": "user", "content": "hi"}],
+            tools=[],
+            request_overrides={"temperature": 0.7},
+        )
+        assert kw.get("temperature") == 0.7
+
+
 class TestCodexTransportXaiServiceTierStrip:
     """xAI Responses API rejects ``service_tier`` (#28490).
 
