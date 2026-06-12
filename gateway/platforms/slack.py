@@ -323,6 +323,11 @@ class SlackAdapter(BasePlatformAdapter):
 
     MAX_MESSAGE_LENGTH = 39000  # Slack API allows 40,000 chars; leave margin
     supports_code_blocks = True  # Slack mrkdwn renders fenced code blocks
+    # Slack blocks typed native slash commands inside threads ("/approve is
+    # not supported in threads. Sorry!").  The adapter rewrites a leading
+    # "!" to "/" for known commands (see _handle_slack_message), so "!" is
+    # the prefix that works everywhere — instruction text must show it.
+    typed_command_prefix = "!"
 
     def __init__(self, config: PlatformConfig):
         super().__init__(config, Platform.SLACK)
@@ -3219,8 +3224,13 @@ class SlackAdapter(BasePlatformAdapter):
             return SendResult(success=False, error="Not connected")
 
         try:
-            body = message[:2900] + "..." if len(message) > 2900 else message
             thread_ts = self._resolve_thread_ts(None, metadata)
+            # Same 3000-char section-block cap as send_exec_approval: budget
+            # the body against the rendered title so the wrapper never pushes
+            # the block over the limit (overflow → invalid_blocks → no buttons).
+            _title = (title or "Confirm")[:150]
+            budget = 3000 - len(f"*{_title}*\n\n") - len("...")
+            body = message[:budget] + "..." if len(message) > budget else message
             # Encode session_key and confirm_id into the button value so the
             # callback handler can resolve without extra bookkeeping.
             value = f"{session_key}|{confirm_id}"
@@ -3230,7 +3240,7 @@ class SlackAdapter(BasePlatformAdapter):
                     "type": "section",
                     "text": {
                         "type": "mrkdwn",
-                        "text": f"*{title or 'Confirm'}*\n\n{body}",
+                        "text": f"*{_title}*\n\n{body}",
                     },
                 },
                 {
