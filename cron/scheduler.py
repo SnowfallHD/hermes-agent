@@ -1120,6 +1120,7 @@ def _build_job_prompt(job: dict, prerun_script: Optional[tuple] = None) -> str:
             (if any) runs inline as before.
     """
     prompt = str(job.get("prompt") or "")
+    runtime_sections: list[str] = []
     skills = job.get("skills")
 
     # Run data-collection script if configured, inject output as context.
@@ -1131,22 +1132,20 @@ def _build_job_prompt(job: dict, prerun_script: Optional[tuple] = None) -> str:
             success, script_output = _run_job_script(script_path)
         if success:
             if script_output:
-                prompt = (
+                runtime_sections.append(
                     "## Script Output\n"
                     "The following data was collected by a pre-run script. "
                     "Use it as context for your analysis.\n\n"
-                    f"```\n{script_output}\n```\n\n"
-                    f"{prompt}"
+                    f"```\n{script_output}\n```"
                 )
             else:
                 # Script produced no output — nothing to report, skip AI call.
                 return None
         else:
-            prompt = (
+            runtime_sections.append(
                 "## Script Error\n"
                 "The data-collection script failed. Report this to the user.\n\n"
-                f"```\n{script_output}\n```\n\n"
-                f"{prompt}"
+                f"```\n{script_output}\n```"
             )
 
     # Inject output from referenced cron jobs as context.
@@ -1183,12 +1182,11 @@ def _build_job_prompt(job: dict, prerun_script: Optional[tuple] = None) -> str:
                 if len(latest_output) > _MAX_CONTEXT_CHARS:
                     latest_output = latest_output[:_MAX_CONTEXT_CHARS] + "\n\n[... output truncated ...]"
                 if latest_output:
-                    prompt = (
+                    runtime_sections.append(
                         f"## Output from job '{source_job_id}'\n"
                         "The following is the most recent output from a preceding "
                         "cron job. Use it as context for your analysis.\n\n"
-                        f"```\n{latest_output}\n```\n\n"
-                        f"{prompt}"
+                        f"```\n{latest_output}\n```"
                     )
                 else:
                     continue  # silent skip — empty output
@@ -1210,6 +1208,33 @@ def _build_job_prompt(job: dict, prerun_script: Optional[tuple] = None) -> str:
         "findings normally, or say [SILENT] and nothing more.]\n\n"
     )
     prompt = cron_hint + prompt
+
+    def _with_runtime_data(scanned_prompt: str) -> str:
+        if not runtime_sections:
+            return scanned_prompt
+        # Runtime data comes from scripts and prior cron outputs. It is data the
+        # agent must analyze, not stored instructions being granted authority, so
+        # do not strict-scan it as if it were the user's cron prompt or vetted
+        # skill content. This prevents bug/triage feeds quoting dangerous
+        # commands from permanently killing otherwise-safe jobs. Invisible
+        # unicode remains sanitized so pasted feed data cannot smuggle markers
+        # through the runtime-data path.
+        from tools.cronjob_tools import _scan_cron_skill_assembled
+
+        cleaned_sections: list[str] = []
+        for section in runtime_sections:
+            cleaned, scan_error = _scan_cron_skill_assembled(section)
+            if scan_error:
+                job_label = job.get("name") or job.get("id") or "<unknown>"
+                logger.warning(
+                    "Cron job '%s': runtime data blocked by injection scanner — %s",
+                    job_label,
+                    scan_error,
+                )
+                raise CronPromptInjectionBlocked(scan_error)
+            cleaned_sections.append(cleaned)
+        return "\n\n".join([*cleaned_sections, scanned_prompt])
+
     if skills is None:
         legacy = job.get("skill")
         skills = [legacy] if legacy else []
@@ -1218,7 +1243,7 @@ def _build_job_prompt(job: dict, prerun_script: Optional[tuple] = None) -> str:
 
     skill_names = [str(name).strip() for name in skills if str(name).strip()]
     if not skill_names:
-        return _scan_assembled_cron_prompt(prompt, job, has_skills=False)
+        return _with_runtime_data(_scan_assembled_cron_prompt(prompt, job, has_skills=False))
 
     from tools.skills_tool import skill_view
     from tools.skill_usage import bump_use
@@ -1292,7 +1317,7 @@ def _build_job_prompt(job: dict, prerun_script: Optional[tuple] = None) -> str:
 
     if prompt:
         parts.extend(["", f"The user has provided the following instruction alongside the skill invocation: {prompt}"])
-    return _scan_assembled_cron_prompt("\n".join(parts), job, has_skills=True)
+    return _with_runtime_data(_scan_assembled_cron_prompt("\n".join(parts), job, has_skills=True))
 
 
 def _scan_assembled_cron_prompt(assembled: str, job: dict, *, has_skills: bool = False) -> str:

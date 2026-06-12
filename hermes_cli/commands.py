@@ -511,6 +511,8 @@ def telegram_bot_commands() -> list[tuple[str, str]]:
     for cmd in COMMAND_REGISTRY:
         if not _is_gateway_available(cmd, overrides):
             continue
+        if cmd.name in _TELEGRAM_NATIVE_MENU_EXCLUDED:
+            continue
         # Built-in arg-taking commands are included — their handlers show
         # usage text when invoked without arguments, and hiding them from
         # the menu hurts discoverability (issue #24312).
@@ -558,9 +560,17 @@ _TELEGRAM_MENU_PRIORITY = (
 """Built-in commands that should stay visible in Telegram's capped menu.
 
 Telegram only displays a small BotCommand menu in practice.  The full Hermes
-registry is still dispatchable when typed manually, but operational commands
-need to survive the visible menu cap ahead of lower-priority built-ins.
+# registry is still dispatchable when typed manually, but operational commands
+# need to survive the visible menu cap ahead of lower-priority built-ins.
 """
+
+_TELEGRAM_NATIVE_MENU_EXCLUDED = frozenset({
+    # Slack has one unavoidable catch-all slot (/hermes) plus two pinned aliases
+    # (/btw, /bg), so advertising every low-value info command natively on
+    # Telegram makes Slack parity impossible under Slack's 50-command cap.
+    # /version remains dispatchable when typed manually and via /hermes version.
+    "version",
+})
 
 
 def _prioritize_telegram_menu_commands(
@@ -1045,6 +1055,10 @@ _SLACK_RESERVED_COMMANDS = frozenset({
 # native slot, the alias spelling stays reachable via /hermes reset).
 _SLACK_PRIORITY_ALIASES = ("btw", "bg")
 
+# Canonical commands that must survive Slack's 50-slash cap because Telegram
+# exposes them natively and users rely on the same operational menu there.
+_SLACK_PRIORITY_COMMANDS = ("debug",)
+
 
 def _sanitize_slack_name(raw: str) -> str:
     """Convert a command name to a valid Slack slash command name.
@@ -1099,10 +1113,20 @@ def slack_native_slashes() -> list[tuple[str, str, str]]:
         entries.append((slack_name, desc[:140], hint[:100]))
         seen.add(slack_name)
 
-    # Priority pass: pin high-value aliases (e.g. /btw, /bg, /reset) ahead of
-    # everything except /hermes, so a new canonical command can never silently
-    # clamp them off the 50-slash cap. Each alias borrows its parent command's
-    # description and hint.
+    # Priority pass: pin high-value canonical commands and aliases ahead of
+    # everything except /hermes, so a new command can never silently clamp them
+    # off the 50-slash cap. Each alias borrows its parent command's description
+    # and hint.
+    _command_by_name = {
+        cmd.name: cmd
+        for cmd in COMMAND_REGISTRY
+        if _is_gateway_available(cmd, overrides)
+    }
+    for name in _SLACK_PRIORITY_COMMANDS:
+        cmd = _command_by_name.get(name)
+        if cmd is not None:
+            _add(cmd.name, cmd.description, cmd.args_hint or "")
+
     _alias_to_cmd = {
         alias: cmd
         for cmd in COMMAND_REGISTRY

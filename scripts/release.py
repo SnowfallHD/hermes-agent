@@ -50,6 +50,7 @@ AUTHOR_MAP = {
     "ondrej.drapalik@gmail.com": "OndrejDrapalik",
     "tomasz.panek@gmail.com": "tomekpanek",
     "philipadsouza@gmail.com": "PhilipAD",
+    "philip.a.dsouza@gmail.com": "PhilipAD",
     "zhuhaoyu0909@icloud.com": "underthestars-zhy",
     "raysun12142006@gmail.com": "yanxue06",
     "alberto.regalado@ymail.com": "ARegalado1",
@@ -1518,6 +1519,10 @@ AUTHOR_MAP = {
     "andreas@schwarz-ketsch.de": "Nea74",  # PR #40022 co-author credit (same Windows ConPTY bridge design)
     "chanhokyim@gmail.com": "joel611",  # PR #33958 salvage (DISCORD_ALLOWED_ROLES role_authorized gateway flag)
     "desg38@gmail.com": "dschnurbusch",  # PR #42373 salvage (archive compressed conversation lineages)
+    "2081789787@qq.com": "pengyuyanITYU",  # PR #43618 (desktop local file tree path hardening)
+    "andyfieb@gmail.com": "mollusk",  # PR #44493 (assistant-ui transient index lookup recovery)
+    "maplestoryjuni222@gmail.com": "BROCCOLO1D",  # PR #42733 (lazy-parse Docker env config)
+    "omarbaradei21@gmail.com": "OmarB97",  # PR #43977 (desktop session model metadata refresh)
 }
 
 
