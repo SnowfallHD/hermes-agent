@@ -1226,12 +1226,39 @@ class TestBangPrefixCommands:
         assert msg_event.source.thread_id == "1111111111.000001"
 
     @pytest.mark.asyncio
+    async def test_bang_with_leading_whitespace_and_newline_resolves(self, adapter):
+        """Slack can preserve whitespace before a thread command; still dispatch."""
+        await adapter._handle_slack_message(self._make_event("  \n\t!goal status"))
+
+        msg_event = adapter.handle_message.call_args[0][0]
+        assert msg_event.text == "/goal status"
+        assert msg_event.message_type == MessageType.COMMAND
+
+    @pytest.mark.asyncio
+    async def test_bang_after_bot_mention_resolves(self, adapter):
+        """Mention-prefixed text like ``<@bot> !steer ...`` should dispatch."""
+        await adapter._handle_slack_message(self._make_event("<@U_BOT> !steer tighten scope"))
+
+        msg_event = adapter.handle_message.call_args[0][0]
+        assert msg_event.text == "/steer tighten scope"
+        assert msg_event.message_type == MessageType.COMMAND
+
+    @pytest.mark.asyncio
     async def test_bang_unknown_token_passes_through_unchanged(self, adapter):
         """``!nice work`` is just a casual message — must NOT be rewritten."""
         await adapter._handle_slack_message(self._make_event("!nice work"))
 
         msg_event = adapter.handle_message.call_args[0][0]
         assert msg_event.text == "!nice work"
+        assert msg_event.message_type != MessageType.COMMAND
+
+    @pytest.mark.asyncio
+    async def test_later_line_bang_command_passes_through_unchanged(self, adapter):
+        """Do not execute a command found later inside prose, quotes, or code."""
+        await adapter._handle_slack_message(self._make_event("please consider this:\n!goal do x"))
+
+        msg_event = adapter.handle_message.call_args[0][0]
+        assert msg_event.text == "please consider this:\n!goal do x"
         assert msg_event.message_type != MessageType.COMMAND
 
     @pytest.mark.asyncio
