@@ -12,7 +12,6 @@ private reasoning traces.
 from __future__ import annotations
 
 import asyncio
-import hmac
 import json
 import re
 import sqlite3
@@ -43,22 +42,20 @@ _MAX_THOUGHT_CHARS = 220
 _WS_POLL_SECONDS = 1.0
 
 
-def _check_ws_token(provided: Optional[str]) -> bool:
-    """Constant-time compare against the dashboard session token.
+def _ws_upgrade_authorized(ws: WebSocket) -> bool:
+    """Delegate Thoughts live-feed WS auth to the dashboard's canonical gate.
 
-    Mirrors the Kanban plugin's WebSocket auth pattern. Bare FastAPI tests do
-    not import the dashboard server, so they are allowed through.
+    The browser plugin SDK may authenticate WebSockets with a loopback token,
+    a gated-mode single-use ticket, or a server-internal credential. Reusing
+    ``web_server._ws_auth_ok`` keeps this plugin aligned with core dashboard
+    auth and avoids stale direct reads of ``__HERMES_SESSION_TOKEN__``.
     """
-    if not provided:
-        return False
     try:
         from hermes_cli import web_server as _ws
     except Exception:
+        # Bare plugin tests import the router outside a dashboard server.
         return True
-    expected = getattr(_ws, "_SESSION_TOKEN", None)
-    if not expected:
-        return True
-    return hmac.compare_digest(str(provided), str(expected))
+    return bool(_ws._ws_auth_ok(ws))
 
 
 def _resolve_board(board: Optional[str]) -> Optional[str]:
@@ -1000,8 +997,7 @@ def get_thoughts(
 
 @router.websocket("/events")
 async def thoughts_events(ws: WebSocket):
-    token = ws.query_params.get("token")
-    if not _check_ws_token(token):
+    if not _ws_upgrade_authorized(ws):
         await ws.close(code=http_status.WS_1008_POLICY_VIOLATION)
         return
     await ws.accept()
