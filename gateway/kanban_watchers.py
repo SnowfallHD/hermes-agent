@@ -345,6 +345,7 @@ class GatewayKanbanWatchersMixin:
                     title = (task.title if task else sub["task_id"])[:120]
                     for ev in d["events"]:
                         kind = ev.kind
+                        raw_reason = ""
                         # Identity prefix: attribute terminal pings to the
                         # worker that did the work. Makes fleets (where one
                         # chat subscribes to many tasks) legible at a glance.
@@ -375,7 +376,8 @@ class GatewayKanbanWatchersMixin:
                         elif kind == "blocked":
                             reason = ""
                             if ev.payload and ev.payload.get("reason"):
-                                reason = f": {str(ev.payload['reason'])[:160]}"
+                                raw_reason = str(ev.payload["reason"])[:160]
+                                reason = f": {raw_reason}"
                             msg = f"⏸ {tag}Kanban {sub['task_id']} blocked{reason}"
                         elif kind == "gave_up":
                             err = ""
@@ -408,9 +410,30 @@ class GatewayKanbanWatchersMixin:
                             sub["chat_id"], sub.get("thread_id") or "",
                         )
                         try:
-                            await adapter.send(
-                                sub["chat_id"], msg, metadata=metadata,
-                            )
+                            if (
+                                kind == "blocked"
+                                and platform_str == "slack"
+                                and hasattr(adapter, "send_kanban_blocked")
+                            ):
+                                command_prefix = f"!kanban --board {board_slug}" if board_slug else "!kanban"
+                                fallback_text = (
+                                    f"{msg}\n"
+                                    f"{command_prefix} unblock {sub['task_id']}\n"
+                                    f"{command_prefix} show {sub['task_id']}"
+                                )
+                                await adapter.send_kanban_blocked(
+                                    sub["chat_id"],
+                                    sub["task_id"],
+                                    title,
+                                    reason=raw_reason,
+                                    board=board_slug,
+                                    fallback_text=fallback_text,
+                                    metadata=metadata,
+                                )
+                            else:
+                                await adapter.send(
+                                    sub["chat_id"], msg, metadata=metadata,
+                                )
                             logger.debug(
                                 "kanban notifier: delivered %s event for %s to %s/%s on board %s",
                                 kind, sub["task_id"], platform_str, sub["chat_id"], board_slug,

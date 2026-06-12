@@ -28,17 +28,6 @@
     return `${url}${sep}board=${encodeURIComponent(board)}`;
   }
 
-  function token() {
-    return window.__HERMES_SESSION_TOKEN__ || "";
-  }
-
-  function wsUrl(cursor) {
-    const proto = window.location.protocol === "https:" ? "wss:" : "ws:";
-    const qs = new URLSearchParams({ token: token(), cursor: String(cursor || 0), limit: "100" });
-    const board = selectedBoard();
-    if (board) qs.set("board", board);
-    return `${proto}//${window.location.host}${API}/events?${qs}`;
-  }
 
   function entryTime(entry) {
     const value = entry && entry.created_at;
@@ -112,24 +101,34 @@
 
       function connect() {
         if (stopped) return;
-        const ws = new WebSocket(wsUrl(latestEventId));
-        wsRef.current = ws;
-        ws.onopen = function () { if (!stopped) setConnected(true); };
-        ws.onmessage = function (ev) {
-          try {
-            const data = JSON.parse(ev.data);
-            const incoming = data.entries || [];
-            if (incoming.length) {
-              setEntries(function (prev) { return dedupeAppend(prev, incoming); });
-              setLatestEventId(data.latest_event_id || 0);
-            }
-          } catch (_e) { /* ignore malformed frames */ }
-        };
-        ws.onerror = function () { setConnected(false); };
-        ws.onclose = function () {
+        const wsParams = { cursor: String(latestEventId || 0), limit: "100" };
+        const activeBoard = selectedBoard();
+        if (activeBoard) wsParams.board = activeBoard;
+        SDK.buildWsUrl(`${API}/events`, wsParams).then(function (url) {
+          if (stopped) return;
+          let ws;
+          try { ws = new WebSocket(url); } catch (_e) { return; }
+          wsRef.current = ws;
+          ws.onopen = function () { if (!stopped) setConnected(true); };
+          ws.onmessage = function (ev) {
+            try {
+              const data = JSON.parse(ev.data);
+              const incoming = data.entries || [];
+              if (incoming.length) {
+                setEntries(function (prev) { return dedupeAppend(prev, incoming); });
+                setLatestEventId(data.latest_event_id || 0);
+              }
+            } catch (_e) { /* ignore malformed frames */ }
+          };
+          ws.onerror = function () { setConnected(false); };
+          ws.onclose = function () {
+            setConnected(false);
+            if (!stopped) retryTimer = setTimeout(connect, 1500);
+          };
+        }).catch(function () {
           setConnected(false);
           if (!stopped) retryTimer = setTimeout(connect, 1500);
-        };
+        });
       }
 
       connect();
