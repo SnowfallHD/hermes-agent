@@ -1523,6 +1523,8 @@ AUTHOR_MAP = {
     "andyfieb@gmail.com": "mollusk",  # PR #44493 (assistant-ui transient index lookup recovery)
     "maplestoryjuni222@gmail.com": "BROCCOLO1D",  # PR #42733 (lazy-parse Docker env config)
     "omarbaradei21@gmail.com": "OmarB97",  # PR #43977 (desktop session model metadata refresh)
+    "actions@users.noreply.github.com": "SnowfallHD",  # SnowfallHD fork CI repair commits
+    "konsisumer@users.noreply.github.com": "konsisumer",  # upstream noreply author mapping
 }
 
 
