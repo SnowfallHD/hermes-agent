@@ -1140,6 +1140,34 @@ DEFAULT_CONFIG = {
         },
     },
 
+    # Passive/local metacognitive router. Default-off feature flag; dry_run
+    # remains true so enabling this records only redacted local JSONL state and
+    # never changes gateway/runtime behavior by itself.
+    "metacognitive_router": {
+        "enabled": False,
+        "dry_run": True,
+        "record_paths": {
+            "tool_results": False,
+        },
+        "behavior_routing": {
+            "enabled": False,
+            "allow_internal_kanban": False,
+            "allow_internal_execution_recommendations": False,
+            "approval_assignee": "builder",
+            "internal_board": None,
+            "internal_assignee": "builder",
+        },
+    },
+
+    # Persistent mind-loop reducer. Default-off and dry-run by default; it only
+    # reduces local files into typed local state JSON when explicitly asked via
+    # write_state, and never changes cron/gateway/external behavior by itself.
+    "persistent_mind_loop": {
+        "enabled": False,
+        "dry_run": True,
+        "write_state": False,
+    },
+
     "compression": {
         "enabled": True,
         "threshold": 0.50,            # compress when context usage exceeds this ratio

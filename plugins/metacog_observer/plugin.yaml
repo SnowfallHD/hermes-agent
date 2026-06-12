@@ -1,0 +1,7 @@
+name: metacog-observer
+version: 0.1.0
+description: "Safe metacognitive observer hooks for recording gated dry-run tool-result signals. Behavior is disabled unless metacognitive_router config flags opt in."
+author: SnowfallHD
+kind: backend
+provides_hooks:
+  - post_tool_call
