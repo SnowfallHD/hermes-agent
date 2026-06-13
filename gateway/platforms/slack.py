@@ -2422,13 +2422,19 @@ class SlackAdapter(BasePlatformAdapter):
                 # Only append if the blocks contain text not already present
                 # in the plain text field (avoids duplication).
                 stripped_blocks = blocks_text.strip()
-                if stripped_blocks and stripped_blocks not in text.strip():
+                normalized_blocks = _normalize_slack_bang_command(stripped_blocks).strip()
+                current_text = text.strip()
+                if (
+                    stripped_blocks
+                    and stripped_blocks not in current_text
+                    and normalized_blocks not in current_text
+                ):
                     logger.debug(
                         "Slack: extracted additional text from blocks "
                         "(likely quoted/forwarded content): %s",
                         stripped_blocks[:300],
                     )
-                    text = (text.strip() + "\n" + stripped_blocks).strip()
+                    text = (current_text + "\n" + stripped_blocks).strip()
 
             blocks_payload = _serialize_slack_blocks_for_agent(blocks)
             if blocks_payload:
@@ -2652,8 +2658,20 @@ class SlackAdapter(BasePlatformAdapter):
                     for t in to_remove:
                         self._mentioned_threads.discard(t)
 
+        # Determine message type from the raw/normalized Slack text before any
+        # context decoration.  Thread-context prefixes are for agent turns only;
+        # if we prepend them to a command, MessageEvent.get_command() sees the
+        # prefix instead of /goal or /steer and the command leaks into the LLM.
+        msg_type = MessageType.TEXT
+        if (original_text or "").startswith("/"):
+            msg_type = MessageType.COMMAND
+
         # When entering a thread for the first time (no existing session),
         # fetch thread context so the agent understands the conversation.
+        # Plain messages get the legacy inline prefix. Commands keep event.text
+        # parseable and carry the fetched context separately for handlers that
+        # launch an agent turn (notably /goal <text> kickoff).
+        channel_context = None
         if is_thread_reply and not self._has_active_session_for_thread(
             channel_id=channel_id,
             thread_ts=event_thread_ts,
@@ -2666,12 +2684,10 @@ class SlackAdapter(BasePlatformAdapter):
                 team_id=team_id,
             )
             if thread_context:
-                text = thread_context + text
-
-        # Determine message type
-        msg_type = MessageType.TEXT
-        if (original_text or "").startswith("/"):
-            msg_type = MessageType.COMMAND
+                if msg_type == MessageType.COMMAND:
+                    channel_context = thread_context
+                else:
+                    text = thread_context + text
 
         # Handle file attachments
         media_urls = []
@@ -2925,6 +2941,7 @@ class SlackAdapter(BasePlatformAdapter):
             reply_to_message_id=thread_ts if thread_ts != ts else None,
             channel_prompt=_channel_prompt,
             reply_to_text=reply_to_text,
+            channel_context=channel_context,
             auto_skill=_auto_skill,
         )
 
