@@ -1752,10 +1752,16 @@ DEFAULT_CONFIG = {
         "memory_char_limit": 2200,   # ~800 tokens at 2.75 chars/token
         "user_char_limit": 1375,     # ~500 tokens at 2.75 chars/token
         # External memory provider plugin (empty = built-in only).
-        # Set to a provider name to activate: "openviking", "mem0",
+        # Set to a provider name to activate: "honcho", "openviking", "mem0",
         # "hindsight", "holographic", "retaindb", "byterover".
         # Only ONE external provider is allowed at a time.
         "provider": "",
+        # How to interpret an active external provider:
+        #   canonical (default) — provider is durable long-term memory;
+        #                         MEMORY.md / USER.md are local/recent cache.
+        #   additive            — legacy behavior; local md remains first-class
+        #                         and provider context/tools are appended.
+        "provider_mode": "canonical",
     },
 
     # Subagent delegation — override the provider:model used by delegate_task

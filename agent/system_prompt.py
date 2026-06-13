@@ -41,6 +41,7 @@ from agent.prompt_builder import (
     TOOL_USE_ENFORCEMENT_GUIDANCE,
     TOOL_USE_ENFORCEMENT_MODELS,
 )
+from agent.memory_policy import canonical_provider_active, format_local_recent_block
 from agent.runtime_cwd import resolve_context_cwd
 
 
@@ -340,19 +341,46 @@ def build_system_prompt_parts(agent: Any, system_message: Optional[str] = None) 
     # ── Volatile tier (changes per session/turn — never cached) ───
     volatile_parts: List[str] = []
 
+    _canonical_memory_provider = canonical_provider_active(agent)
+
+    # External memory provider system prompt block.  In canonical mode this
+    # comes before local md so Honcho/Mem0/etc. reads as the durable source of
+    # truth; built-in MEMORY.md / USER.md remain as bounded local/recent cache.
+    if _canonical_memory_provider and agent._memory_manager:
+        try:
+            _ext_mem_block = agent._memory_manager.build_system_prompt()
+            if _ext_mem_block:
+                volatile_parts.append(_ext_mem_block)
+        except Exception:
+            pass
+
     if agent._memory_store:
         if agent._memory_enabled:
             mem_block = agent._memory_store.format_for_system_prompt("memory")
             if mem_block:
+                if _canonical_memory_provider:
+                    try:
+                        mem_block = format_local_recent_block(
+                            mem_block, target="memory", canonical_provider=True
+                        )
+                    except Exception:
+                        pass
                 volatile_parts.append(mem_block)
         # USER.md is always included when enabled.
         if agent._user_profile_enabled:
             user_block = agent._memory_store.format_for_system_prompt("user")
             if user_block:
+                if _canonical_memory_provider:
+                    try:
+                        user_block = format_local_recent_block(
+                            user_block, target="user", canonical_provider=True
+                        )
+                    except Exception:
+                        pass
                 volatile_parts.append(user_block)
 
-    # External memory provider system prompt block (additive to built-in)
-    if agent._memory_manager:
+    # External memory provider system prompt block (legacy additive mode)
+    if not _canonical_memory_provider and agent._memory_manager:
         try:
             _ext_mem_block = agent._memory_manager.build_system_prompt()
             if _ext_mem_block:

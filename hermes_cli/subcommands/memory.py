@@ -19,7 +19,8 @@ def build_memory_parser(subparsers, *, cmd_memory: Callable) -> None:
             "Available providers: honcho, openviking, mem0, hindsight,\n"
             "holographic, retaindb, byterover.\n\n"
             "Only one external provider can be active at a time.\n"
-            "Built-in memory (MEMORY.md/USER.md) is always active."
+            "By default, an active provider is canonical long-term memory;\n"
+            "MEMORY.md/USER.md stay as local recent/additive context."
         ),
     )
     memory_sub = memory_parser.add_subparsers(dest="memory_command")

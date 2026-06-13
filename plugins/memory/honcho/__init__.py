@@ -1241,14 +1241,20 @@ class HonchoMemoryProvider(MemoryProvider):
         content: str,
         metadata: Optional[Dict[str, Any]] = None,
     ) -> None:
-        """Mirror built-in user profile writes as Honcho conclusions.
+        """Mirror built-in memory writes as Honcho conclusions.
 
-        ``metadata`` is accepted for compatibility with the write-origin
-        work landed in main (commit 6a957a74); it's not yet threaded into
-        the Honcho conclusion payload.  Left as a follow-up so this PR
-        stays focused on the 7-PR consolidation and its review follow-ups.
+        In provider-canonical setups, the generic ``memory`` tool may still be
+        used as the familiar write surface.  Do not only mirror ``target=user``:
+        ``target=memory`` carries the agent's durable notes/project facts and
+        would otherwise stay trapped in bounded local md.
         """
-        if action != "add" or target != "user" or not content:
+        if action not in {"add", "replace"} or not content:
+            return
+        if target == "user":
+            peer = "user"
+        elif target == "memory":
+            peer = "ai"
+        else:
             return
         if self._cron_skipped:
             return
@@ -1260,7 +1266,7 @@ class HonchoMemoryProvider(MemoryProvider):
 
         def _write():
             try:
-                self._manager.create_conclusion(self._session_key, content)
+                self._manager.create_conclusion(self._session_key, content, peer=peer)
             except Exception as e:
                 logger.debug("Honcho memory mirror failed: %s", e)
 
