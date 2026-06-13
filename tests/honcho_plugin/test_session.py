@@ -4,7 +4,7 @@ import time
 
 from datetime import datetime
 from types import SimpleNamespace
-from unittest.mock import MagicMock
+from unittest.mock import MagicMock, patch
 
 from plugins.memory.honcho.session import (
     HonchoSession,
@@ -398,6 +398,50 @@ class TestPeerLookupHelpers:
             "content": "Robert prefers vinyl",
             "session_id": session.honcho_session_id,
         }])
+
+
+class ImmediateThread:
+    def __init__(self, target=None, *args, **kwargs):
+        self._target = target
+
+    def start(self):
+        if self._target:
+            self._target()
+
+    def is_alive(self):
+        return False
+
+    def join(self, timeout=None):
+        return None
+
+
+class TestHonchoMemoryWriteMirror:
+    def _provider(self):
+        provider = HonchoMemoryProvider()
+        provider._session_initialized = True
+        provider._session_key = "telegram:123"
+        provider._manager = MagicMock()
+        provider._cron_skipped = False
+        provider._recall_mode = "hybrid"
+        return provider
+
+    def test_add_user_write_is_mirrored_to_honcho(self):
+        provider = self._provider()
+        with patch("plugins.memory.honcho.threading.Thread", ImmediateThread):
+            provider.on_memory_write("add", "user", "User prefers dark mode")
+
+        provider._manager.create_conclusion.assert_called_once_with(
+            "telegram:123", "User prefers dark mode", peer="user"
+        )
+
+    def test_add_memory_write_is_mirrored_to_honcho(self):
+        provider = self._provider()
+        with patch("plugins.memory.honcho.threading.Thread", ImmediateThread):
+            provider.on_memory_write("add", "memory", "Project uses pytest")
+
+        provider._manager.create_conclusion.assert_called_once_with(
+            "telegram:123", "Project uses pytest", peer="ai"
+        )
 
 
 class TestConcludeToolDispatch:

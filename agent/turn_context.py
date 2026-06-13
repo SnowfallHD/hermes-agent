@@ -29,6 +29,7 @@ from dataclasses import dataclass
 from typing import Any, Dict, List, Optional
 
 from agent.iteration_budget import IterationBudget
+from agent.memory_policy import should_run_local_memory_nudge
 from agent.model_metadata import estimate_request_tokens_rough
 
 logger = logging.getLogger(__name__)
@@ -208,9 +209,7 @@ def build_turn_context(
 
     # Track memory nudge trigger (turn-based, checked here).
     should_review_memory = False
-    if (agent._memory_nudge_interval > 0
-            and "memory" in agent.valid_tool_names
-            and agent._memory_store):
+    if should_run_local_memory_nudge(agent):
         agent._turns_since_memory += 1
         if agent._turns_since_memory >= agent._memory_nudge_interval:
             should_review_memory = True

@@ -402,10 +402,16 @@ def cmd_status(args) -> None:
     config = load_config()
     mem_config = config.get("memory", {})
     provider_name = mem_config.get("provider", "")
+    provider_mode = mem_config.get("provider_mode", "canonical")
 
     print(f"\nMemory status\n" + "─" * 40)
-    print(f"  Built-in:  always active")
     print(f"  Provider:  {provider_name or '(none — built-in only)'}")
+    if provider_name and provider_mode == "canonical":
+        print("  Mode:      canonical provider; local md is recent/additive cache")
+    elif provider_name:
+        print("  Mode:      additive; local md remains first-class")
+    else:
+        print("  Built-in:  canonical (no external provider configured)")
 
     if provider_name:
         provider_config = mem_config.get(provider_name, {})

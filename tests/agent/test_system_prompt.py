@@ -17,6 +17,9 @@ def _make_agent(**overrides):
         _kanban_worker_guidance="",
         _memory_store=None,
         _memory_manager=None,
+        _memory_enabled=False,
+        _user_profile_enabled=False,
+        _memory_provider_mode="canonical",
         model="",
         provider="",
         platform="",
@@ -65,6 +68,50 @@ def _stable_prompt(agent):
         patch("run_agent.build_context_files_prompt", return_value=""),
     ):
         return build_system_prompt_parts(agent)["stable"]
+
+
+class FakeMemoryStore:
+    def format_for_system_prompt(self, target):
+        if target == "memory":
+            return "# MEMORY (your personal notes) [1% — 1/100 chars]\nlocal memory fact"
+        if target == "user":
+            return "# USER PROFILE (who the user is) [1% — 1/100 chars]\nlocal user fact"
+        return ""
+
+
+class FakeProvider:
+    name = "honcho"
+
+
+class FakeMemoryManager:
+    providers = [FakeProvider()]
+
+    def build_system_prompt(self):
+        return "# Honcho Memory\ncanonical provider block"
+
+
+class TestMemoryProviderCanonicalPrompt:
+    def test_external_provider_precedes_local_recent_blocks(self):
+        agent = _make_agent(
+            _memory_store=FakeMemoryStore(),
+            _memory_manager=FakeMemoryManager(),
+            _memory_enabled=True,
+            _user_profile_enabled=True,
+            _memory_provider_mode="canonical",
+        )
+        with (
+            patch("run_agent.load_soul_md", return_value=""),
+            patch("run_agent.build_nous_subscription_prompt", return_value=""),
+            patch("run_agent.build_environment_hints", return_value=""),
+            patch("run_agent.build_context_files_prompt", return_value=""),
+        ):
+            volatile = build_system_prompt_parts(agent)["volatile"]
+
+        assert volatile.index("# Honcho Memory") < volatile.index("# LOCAL RECENT MEMORY")
+        assert "# LOCAL RECENT USER PROFILE" in volatile
+        assert "Honcho/external provider is canonical" in volatile
+        assert "# MEMORY (your personal notes)" not in volatile
+        assert "# USER PROFILE (who the user is)" not in volatile
 
 
 class TestCodingContextBlock:
