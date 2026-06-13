@@ -4784,8 +4784,14 @@ def test_model_options_does_not_overwrite_curated_models(monkeypatch):
     ) as listing:
         # If provider_model_ids gets called at all, the handler is still
         # overwriting curated with live — that's the regression we're
-        # guarding against.
-        with patch("hermes_cli.models.provider_model_ids") as live_fetch:
+        # guarding against.  Also pin pricing to an empty local catalog: the
+        # model picker enriches rows with best-effort pricing, but this test is
+        # about preserving curated model IDs and must never depend on live
+        # provider pricing endpoints in CI.
+        with (
+            patch("hermes_cli.models.provider_model_ids") as live_fetch,
+            patch("hermes_cli.models.get_pricing_for_provider", return_value={}),
+        ):
             resp = server._methods["model.options"](99, {"session_id": ""})
 
     assert "result" in resp, resp

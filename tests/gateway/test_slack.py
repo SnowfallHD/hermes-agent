@@ -116,10 +116,21 @@ def adapter():
 
 @pytest.fixture(autouse=True)
 def _redirect_cache(tmp_path, monkeypatch):
-    """Point document cache to tmp_path so tests don't touch ~/.hermes."""
+    """Keep Slack tests hermetic from local document cache and live Slack env."""
     monkeypatch.setattr(
         "gateway.platforms.base.DOCUMENT_CACHE_DIR", tmp_path / "doc_cache"
     )
+    # Coop's live gateway may whitelist real Slack channels via environment.
+    # Unit tests use synthetic C123/D123 channels and must not inherit that
+    # runtime whitelist, or mention/thread routing tests silently short-circuit.
+    for key in (
+        "SLACK_ALLOWED_CHANNELS",
+        "SLACK_FREE_RESPONSE_CHANNELS",
+        "SLACK_REQUIRE_MENTION",
+        "SLACK_STRICT_MENTION",
+        "SLACK_ALLOW_BOTS",
+    ):
+        monkeypatch.delenv(key, raising=False)
 
 
 # ---------------------------------------------------------------------------
@@ -1213,6 +1224,30 @@ class TestBangPrefixCommands:
         assert msg_event.message_type == MessageType.COMMAND
 
     @pytest.mark.asyncio
+    async def test_bang_command_blocks_duplicate_does_not_pollute_args(self, adapter):
+        """Slack rich_text blocks mirror raw !cmd text; do not append it after normalization."""
+        evt = self._make_event("!goal status")
+        evt["blocks"] = [
+            {
+                "type": "rich_text",
+                "elements": [
+                    {
+                        "type": "rich_text_section",
+                        "elements": [{"type": "text", "text": "!goal status"}],
+                    }
+                ],
+            }
+        ]
+
+        await adapter._handle_slack_message(evt)
+
+        msg_event = adapter.handle_message.call_args[0][0]
+        assert msg_event.text == "/goal status"
+        assert msg_event.message_type == MessageType.COMMAND
+        assert msg_event.get_command() == "goal"
+        assert msg_event.get_command_args() == "status"
+
+    @pytest.mark.asyncio
     async def test_bang_works_inside_thread(self, adapter):
         """The whole point: ``!stop`` inside a thread reply dispatches."""
         evt = self._make_event("!stop", thread_ts="1111111111.000001")
@@ -1226,12 +1261,79 @@ class TestBangPrefixCommands:
         assert msg_event.source.thread_id == "1111111111.000001"
 
     @pytest.mark.asyncio
+    async def test_bang_command_in_new_thread_is_not_prefixed_with_thread_context(
+        self, adapter
+    ):
+        """Fetched Slack thread context must not hide the leading /command."""
+        adapter._fetch_thread_context = AsyncMock(
+            return_value="[Thread context]\nparent\n[End]\n\n"
+        )
+        adapter._fetch_thread_parent_text = AsyncMock(return_value="parent")
+
+        evt = self._make_event("!goal status", thread_ts="1111111111.000001")
+        await adapter._handle_slack_message(evt)
+
+        msg_event = adapter.handle_message.call_args[0][0]
+        assert msg_event.text == "/goal status"
+        assert msg_event.message_type == MessageType.COMMAND
+        assert msg_event.get_command() == "goal"
+        assert msg_event.get_command_args() == "status"
+        assert msg_event.channel_context == "[Thread context]\nparent\n[End]\n\n"
+
+    @pytest.mark.asyncio
+    async def test_slash_command_in_new_thread_is_not_prefixed_with_thread_context(
+        self, adapter
+    ):
+        """Raw slash command events also need to stay parseable."""
+        adapter._fetch_thread_context = AsyncMock(
+            return_value="[Thread context]\nparent\n[End]\n\n"
+        )
+        adapter._fetch_thread_parent_text = AsyncMock(return_value="parent")
+
+        evt = self._make_event("/goal status", thread_ts="1111111111.000001")
+        await adapter._handle_slack_message(evt)
+
+        msg_event = adapter.handle_message.call_args[0][0]
+        assert msg_event.text == "/goal status"
+        assert msg_event.message_type == MessageType.COMMAND
+        assert msg_event.get_command() == "goal"
+        assert msg_event.get_command_args() == "status"
+        assert msg_event.channel_context == "[Thread context]\nparent\n[End]\n\n"
+
+    @pytest.mark.asyncio
+    async def test_bang_with_leading_whitespace_and_newline_resolves(self, adapter):
+        """Slack can preserve whitespace before a thread command; still dispatch."""
+        await adapter._handle_slack_message(self._make_event("  \n\t!goal status"))
+
+        msg_event = adapter.handle_message.call_args[0][0]
+        assert msg_event.text == "/goal status"
+        assert msg_event.message_type == MessageType.COMMAND
+
+    @pytest.mark.asyncio
+    async def test_bang_after_bot_mention_resolves(self, adapter):
+        """Mention-prefixed text like ``<@bot> !steer ...`` should dispatch."""
+        await adapter._handle_slack_message(self._make_event("<@U_BOT> !steer tighten scope"))
+
+        msg_event = adapter.handle_message.call_args[0][0]
+        assert msg_event.text == "/steer tighten scope"
+        assert msg_event.message_type == MessageType.COMMAND
+
+    @pytest.mark.asyncio
     async def test_bang_unknown_token_passes_through_unchanged(self, adapter):
         """``!nice work`` is just a casual message — must NOT be rewritten."""
         await adapter._handle_slack_message(self._make_event("!nice work"))
 
         msg_event = adapter.handle_message.call_args[0][0]
         assert msg_event.text == "!nice work"
+        assert msg_event.message_type != MessageType.COMMAND
+
+    @pytest.mark.asyncio
+    async def test_later_line_bang_command_passes_through_unchanged(self, adapter):
+        """Do not execute a command found later inside prose, quotes, or code."""
+        await adapter._handle_slack_message(self._make_event("please consider this:\n!goal do x"))
+
+        msg_event = adapter.handle_message.call_args[0][0]
+        assert msg_event.text == "please consider this:\n!goal do x"
         assert msg_event.message_type != MessageType.COMMAND
 
     @pytest.mark.asyncio

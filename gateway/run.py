@@ -6857,9 +6857,15 @@ class GatewayRunner(GatewayAuthorizationMixin, GatewayKanbanWatchersMixin, Gatew
             # continuation prompt against the current turn.
             if _cmd_def_inner and _cmd_def_inner.name == "goal":
                 _goal_arg = (event.get_command_args() or "").strip().lower()
-                if not _goal_arg or _goal_arg in {"status", "pause", "resume", "clear", "stop", "done"}:
+                if not _goal_arg or _goal_arg in {"status", "pause", "resume", "clear", "stop", "done", "end"}:
                     return await self._handle_goal_command(event)
-                return "Agent is running — use /goal status / pause / clear mid-run, or /stop before setting a new goal."
+                if getattr(source, "platform", None) == Platform.SLACK:
+                    return (
+                        "Agent is running — use !goal status / !goal pause / "
+                        "!goal resume / !goal end mid-run, or !stop before "
+                        "setting a new goal."
+                    )
+                return "Agent is running — use /goal status / pause / resume / end mid-run, or /stop before setting a new goal."
 
             # /subgoal is safe mid-run — it only modifies the goal's
             # subgoals list, which the judge reads at the next turn

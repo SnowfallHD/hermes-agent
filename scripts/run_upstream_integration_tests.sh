@@ -12,9 +12,9 @@ cd "$ROOT"
 PYTHON_BIN="${PYTHON:-}"
 if [[ -z "$PYTHON_BIN" ]]; then
   for candidate in \
-    "$ROOT/.venv/bin/python" \
     "$ROOT/venv/bin/python" \
     "$HOME/.hermes/hermes-agent/venv/bin/python" \
+    "$ROOT/.venv/bin/python" \
     python3 \
     python; do
     if command -v "$candidate" >/dev/null 2>&1; then
@@ -67,7 +67,9 @@ run_pytest --allow-no-tests \
 # Coop custom surfaces + upstream conflict surfaces.
 run_pytest \
   tests/agent/test_prompt_builder.py \
+  tests/agent/test_preflight_compression_diagnostics.py \
   tests/plugins/test_thoughts_dashboard_plugin.py \
   tests/cron/test_cron_mind_event_classification.py \
+  tests/hermes_cli/test_custom_fork_guardrails.py \
   tests/hermes_cli/test_tools_config.py \
   tests/hermes_cli/test_web_server.py

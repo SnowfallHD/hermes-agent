@@ -59,6 +59,43 @@ from gateway.platforms.slack_threaded_delivery import (
 
 logger = logging.getLogger(__name__)
 
+# Slack blocks native slash commands from thread replies, so Hermes accepts a
+# leading ``!`` alias (``!goal`` -> ``/goal``) through the normal message event
+# path.  Slack's text payload is not always as clean as a raw first-byte bang:
+# replies can include leading whitespace/newlines, and channel messages often
+# begin with the bot mention (``<@U...> !goal``).  Normalize those conservative
+# first-meaningful-token cases before command dispatch.
+_SLACK_LEADING_MENTION_RE = re.compile(r"^(?:\s*<@[A-Za-z0-9_]+>\s*)+")
+
+
+def _normalize_slack_bang_command(text: str) -> str:
+    """Convert Slack ``!command`` aliases to dispatchable ``/command`` text.
+
+    Only rewrites when the first meaningful token resolves to a known gateway
+    command.  Casual messages such as ``!nice work`` and quoted/code lines later
+    in a message pass through unchanged.
+    """
+    if not text:
+        return text
+
+    candidate = text.lstrip()
+    candidate = _SLACK_LEADING_MENTION_RE.sub("", candidate).lstrip()
+    if not candidate.startswith("!"):
+        return text
+
+    try:
+        from hermes_cli.commands import is_gateway_known_command
+
+        first_token = candidate[1:].split(maxsplit=1)[0]
+        # Strip "@suffix" the same way MessageEvent.get_command() does, so
+        # forms like ``!stop@hermes`` still resolve.
+        cmd_name = first_token.split("@", 1)[0].lower()
+        if cmd_name and "/" not in cmd_name and is_gateway_known_command(cmd_name):
+            return "/" + candidate[1:]
+    except Exception:  # pragma: no cover - defensive
+        pass
+    return text
+
 # ContextVar carrying the user_id of the slash-command invoker.
 # Set in _handle_slash_command, read in send() to match the correct
 # stashed response_url when multiple users issue commands on the same
@@ -2362,31 +2399,14 @@ class SlackAdapter(BasePlatformAdapter):
         if subtype in {"message_changed", "message_deleted"}:
             return
 
-        original_text = event.get("text", "")
+        raw_original_text = event.get("text", "")
 
         # Slack blocks native slash commands inside threads ("/queue is not
         # supported in threads. Sorry!").  As a workaround, recognise a
         # leading ``!`` as an alternate command prefix and rewrite it to
         # ``/`` so the rest of the pipeline (MessageType.COMMAND tagging,
-        # gateway dispatcher) handles it like a normal slash command.  Only
-        # rewrite when the first token resolves to a known gateway command
-        # so casual messages like "!nice work" pass through unchanged.
-        if original_text.startswith("!"):
-            try:
-                from hermes_cli.commands import is_gateway_known_command
-
-                first_token = original_text[1:].split(maxsplit=1)[0]
-                # Strip "@suffix" the same way get_command() does, so
-                # forms like ``!stop@hermes`` still resolve.
-                cmd_name = first_token.split("@", 1)[0].lower()
-                if (
-                    cmd_name
-                    and "/" not in cmd_name
-                    and is_gateway_known_command(cmd_name)
-                ):
-                    original_text = "/" + original_text[1:]
-            except Exception:  # pragma: no cover - defensive
-                pass
+        # gateway dispatcher) handles it like a normal slash command.
+        original_text = _normalize_slack_bang_command(raw_original_text)
 
         text = original_text
 
@@ -2402,13 +2422,19 @@ class SlackAdapter(BasePlatformAdapter):
                 # Only append if the blocks contain text not already present
                 # in the plain text field (avoids duplication).
                 stripped_blocks = blocks_text.strip()
-                if stripped_blocks and stripped_blocks not in text.strip():
+                normalized_blocks = _normalize_slack_bang_command(stripped_blocks).strip()
+                current_text = text.strip()
+                if (
+                    stripped_blocks
+                    and stripped_blocks not in current_text
+                    and normalized_blocks not in current_text
+                ):
                     logger.debug(
                         "Slack: extracted additional text from blocks "
                         "(likely quoted/forwarded content): %s",
                         stripped_blocks[:300],
                     )
-                    text = (text.strip() + "\n" + stripped_blocks).strip()
+                    text = (current_text + "\n" + stripped_blocks).strip()
 
             blocks_payload = _serialize_slack_blocks_for_agent(blocks)
             if blocks_payload:
@@ -2560,7 +2586,7 @@ class SlackAdapter(BasePlatformAdapter):
         #   3. The message is in a thread where the bot was previously @mentioned, OR
         #   4. There's an existing session for this thread (survives restarts)
         bot_uid = self._team_bot_user_ids.get(team_id, self._bot_user_id)
-        routing_text = original_text or ""
+        routing_text = raw_original_text or original_text or ""
         is_mentioned = bot_uid and f"<@{bot_uid}>" in routing_text
         # Treat Viktor's plain-text "@Hermes" / "Hermes" actionable asks as a
         # real mention. Slack bots sometimes fail to emit a proper mention token,
@@ -2632,8 +2658,20 @@ class SlackAdapter(BasePlatformAdapter):
                     for t in to_remove:
                         self._mentioned_threads.discard(t)
 
+        # Determine message type from the raw/normalized Slack text before any
+        # context decoration.  Thread-context prefixes are for agent turns only;
+        # if we prepend them to a command, MessageEvent.get_command() sees the
+        # prefix instead of /goal or /steer and the command leaks into the LLM.
+        msg_type = MessageType.TEXT
+        if (original_text or "").startswith("/"):
+            msg_type = MessageType.COMMAND
+
         # When entering a thread for the first time (no existing session),
         # fetch thread context so the agent understands the conversation.
+        # Plain messages get the legacy inline prefix. Commands keep event.text
+        # parseable and carry the fetched context separately for handlers that
+        # launch an agent turn (notably /goal <text> kickoff).
+        channel_context = None
         if is_thread_reply and not self._has_active_session_for_thread(
             channel_id=channel_id,
             thread_ts=event_thread_ts,
@@ -2646,12 +2684,10 @@ class SlackAdapter(BasePlatformAdapter):
                 team_id=team_id,
             )
             if thread_context:
-                text = thread_context + text
-
-        # Determine message type
-        msg_type = MessageType.TEXT
-        if (original_text or "").startswith("/"):
-            msg_type = MessageType.COMMAND
+                if msg_type == MessageType.COMMAND:
+                    channel_context = thread_context
+                else:
+                    text = thread_context + text
 
         # Handle file attachments
         media_urls = []
@@ -2905,6 +2941,7 @@ class SlackAdapter(BasePlatformAdapter):
             reply_to_message_id=thread_ts if thread_ts != ts else None,
             channel_prompt=_channel_prompt,
             reply_to_text=reply_to_text,
+            channel_context=channel_context,
             auto_skill=_auto_skill,
         )
 
