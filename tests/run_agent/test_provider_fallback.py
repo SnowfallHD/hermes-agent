@@ -182,6 +182,68 @@ class TestFallbackChainAdvancement:
             assert agent._try_activate_fallback() is True
             assert mock_rpc.call_args.kwargs["explicit_api_key"] == "env-secret"
 
+    def test_drops_primary_extra_body_when_switching_to_fallback(self):
+        """Custom-provider sampling knobs must not leak into a different fallback.
+
+        Local OpenAI-compatible providers often need ``extra_body`` values like
+        temperature/top_p/top_k.  OpenAI Codex rejects those parameters, so
+        fallback activation must strip the primary runtime's extra_body unless
+        the fallback explicitly supplies its own.
+        """
+        fbs = [{"provider": "openai-codex", "model": "gpt-5.5"}]
+        agent = _make_agent(fallback_model=fbs)
+        agent.provider = "custom"
+        agent.model = "qwen35-122b-a10b-int4"
+        agent.base_url = "http://100.94.25.4:8000/v1"
+        agent.request_overrides = {
+            "extra_body": {"temperature": 0.25, "top_p": 0.8, "top_k": 20},
+            "speed": "fast",
+        }
+
+        with (
+            patch(
+                "agent.auxiliary_client.resolve_provider_client",
+                return_value=(
+                    _mock_client(
+                        base_url="https://chatgpt.com/backend-api/codex/",
+                        api_key="fb-key",
+                    ),
+                    "gpt-5.5",
+                ),
+            ),
+            patch("hermes_cli.model_normalize.normalize_model_for_provider", side_effect=lambda m, p: m),
+        ):
+            assert agent._try_activate_fallback() is True
+
+        assert agent.provider == "openai-codex"
+        assert agent.request_overrides == {"speed": "fast"}
+
+    def test_fallback_can_supply_its_own_extra_body(self):
+        fbs = [
+            {
+                "provider": "custom",
+                "model": "fallback-model",
+                "base_url": "https://fallback.example/v1",
+                "extra_body": {"temperature": 0.1},
+            }
+        ]
+        agent = _make_agent(fallback_model=fbs)
+        agent.request_overrides = {"extra_body": {"temperature": 0.25}}
+
+        with (
+            patch(
+                "agent.auxiliary_client.resolve_provider_client",
+                return_value=(
+                    _mock_client(base_url="https://fallback.example/v1"),
+                    "fallback-model",
+                ),
+            ),
+            patch("hermes_cli.model_normalize.normalize_model_for_provider", side_effect=lambda m, p: m),
+        ):
+            assert agent._try_activate_fallback() is True
+
+        assert agent.request_overrides == {"extra_body": {"temperature": 0.1}}
+
 
 # ── Pool-rotation vs fallback gating (#11314) ────────────────────────────
 
