@@ -510,6 +510,7 @@ _QUICK_STATE_FILES = (
     "cron/jobs.json",
     "gateway_state.json",
     "channel_directory.json",
+    "channel_aliases.json",
     "processes.json",
     "kanban.db",                         # default Kanban board DB
     "kanban/boards",                     # named Kanban board DBs + metadata
