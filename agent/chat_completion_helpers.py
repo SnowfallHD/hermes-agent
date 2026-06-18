@@ -1181,6 +1181,29 @@ def try_activate_fallback(agent, reason: "FailoverReason | None" = None) -> bool
             agent._transport_cache.clear()
         agent._fallback_activated = True
 
+        # Provider-specific request overrides (notably custom-provider
+        # ``extra_body`` sampling knobs such as temperature/top_p/top_k) belong
+        # to the runtime that declared them.  Fallback mutates provider/model in
+        # place, so leaving the primary runtime's extra_body attached leaks those
+        # knobs into the fallback request — e.g. local vLLM/Qwen settings sent to
+        # OpenAI Codex, which rejects ``temperature``.  Keep generic overrides
+        # like speed/service_tier, but replace extra_body only when the fallback
+        # explicitly declares its own.
+        _fallback_request_overrides = dict(getattr(agent, "request_overrides", {}) or {})
+        _inherited_extra_body = _fallback_request_overrides.pop("extra_body", None)
+        _fb_explicit_overrides = fb.get("request_overrides")
+        if isinstance(_fb_explicit_overrides, dict):
+            _fallback_request_overrides.update(dict(_fb_explicit_overrides))
+        elif isinstance(fb.get("extra_body"), dict):
+            _fallback_request_overrides["extra_body"] = dict(fb["extra_body"])
+        agent.request_overrides = _fallback_request_overrides
+        if isinstance(_inherited_extra_body, dict) and "extra_body" not in _fallback_request_overrides:
+            logger.info(
+                "Fallback to %s/%s: dropped inherited primary extra_body overrides",
+                fb_provider,
+                fb_model,
+            )
+
         # Clear the credential pool when the fallback provider doesn't match
         # the pool's provider.  The pool was seeded for the primary provider;
         # leaving it attached means downstream recovery (rate_limit / billing /
