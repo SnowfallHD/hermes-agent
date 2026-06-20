@@ -85,6 +85,14 @@ jobs:
 
           BASE="${{ github.event.pull_request.base.sha }}"
           HEAD="${{ github.event.pull_request.head.sha }}"
+          PR="${{ github.event.pull_request.number }}"
+
+          LABELS=$(gh pr view "$PR" --json labels --jq '.labels[].name' || true)
+          if echo "$LABELS" | grep -Fxq 'supply-chain-reviewed'; then
+            echo "reviewed=true" >> "$GITHUB_OUTPUT"
+          else
+            echo "reviewed=false" >> "$GITHUB_OUTPUT"
+          fi
 
           # Added lines only, excluding lockfiles.
           # Three-dot diff (base...head) diffs from the merge base to HEAD,
@@ -166,7 +174,7 @@ jobs:
           fi
 
       - name: Post critical finding comment
-        if: steps.scan.outputs.found == 'true'
+        if: steps.scan.outputs.found == 'true' && steps.scan.outputs.reviewed != 'true'
         env:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
         run: |
@@ -182,10 +190,14 @@ jobs:
           gh pr comment "${{ github.event.pull_request.number }}" --body "$BODY" || echo "::warning::Could not post PR comment (expected for fork PRs — GITHUB_TOKEN is read-only)"
 
       - name: Fail on critical findings
-        if: steps.scan.outputs.found == 'true'
+        if: steps.scan.outputs.found == 'true' && steps.scan.outputs.reviewed != 'true'
         run: |
           echo "::error::CRITICAL supply chain risk patterns detected in this PR. See the PR comment for details."
           exit 1
+
+      - name: Confirm reviewed critical findings
+        if: steps.scan.outputs.found == 'true' && steps.scan.outputs.reviewed == 'true'
+        run: echo "Critical supply chain findings reviewed via supply-chain-reviewed label."
 
   # Gate: reports success when scan was skipped (no relevant files changed).
   # This ensures the required check always gets a status.
