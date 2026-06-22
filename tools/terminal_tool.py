@@ -2158,11 +2158,20 @@ def terminal_tool(
                 default_cwd=cwd,
             )
             try:
+                # The terminal environment may deliberately collapse many raw
+                # session/task ids onto a shared backend key (usually
+                # ``default``) so local/container state is reused across turns.
+                # Process lifecycle is different: AIAgent.close() reaps
+                # background children by the raw run task id. Keep that raw id
+                # on ProcessRegistry sessions so dev servers/watchers spawned
+                # inside a gateway turn do not survive session teardown.
+                process_owner_task_id = task_id or effective_task_id
+
                 if env_type == "local":
                     proc_session = process_registry.spawn_local(
                         command=command,
                         cwd=effective_cwd,
-                        task_id=effective_task_id,
+                        task_id=process_owner_task_id,
                         session_key=session_key,
                         env_vars=env.env if hasattr(env, 'env') else None,
                         use_pty=effective_pty,
@@ -2172,7 +2181,7 @@ def terminal_tool(
                         env=env,
                         command=command,
                         cwd=effective_cwd,
-                        task_id=effective_task_id,
+                        task_id=process_owner_task_id,
                         session_key=session_key,
                     )
 
