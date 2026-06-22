@@ -159,6 +159,53 @@ def test_background_command_prefers_live_env_cwd_over_init_time_cwd(monkeypatch)
     }]
 
 
+def test_background_process_uses_raw_task_id_for_lifecycle_when_env_collapses(monkeypatch):
+    """Shared local envs may collapse to ``default``, but process ownership must
+    stay on the raw session/task id so AIAgent.close() can reap servers it spawned.
+    """
+
+    class FakeEnv:
+        env = {}
+        cwd = "/workspace/live"
+
+    class FakeRegistry:
+        def __init__(self):
+            self.calls = []
+            self.pending_watchers = []
+
+        def spawn_local(self, **kwargs):
+            self.calls.append(kwargs)
+            return SimpleNamespace(id="proc_test", pid=1234)
+
+    import tools.process_registry as process_registry_mod
+
+    registry = FakeRegistry()
+    raw_task_id = "gateway-session-123"
+    monkeypatch.setattr(terminal_tool, "_active_environments", {raw_task_id: FakeEnv()})
+    monkeypatch.setattr(terminal_tool, "_last_activity", {})
+    monkeypatch.setattr(terminal_tool, "_task_env_overrides", {raw_task_id: {"cwd": "/workspace/init"}})
+    monkeypatch.setattr(terminal_tool, "_get_env_config", lambda: _minimal_terminal_config(cwd="/workspace/init"))
+    monkeypatch.setattr(terminal_tool, "_start_cleanup_thread", lambda: None)
+    monkeypatch.setattr(terminal_tool, "_resolve_container_task_id", lambda value: "default")
+    monkeypatch.setattr(
+        terminal_tool,
+        "_check_all_guards",
+        lambda command, env_type: {"approved": True},
+    )
+    monkeypatch.setattr(process_registry_mod, "process_registry", registry)
+
+    result = json.loads(
+        terminal_tool.terminal_tool(
+            command="npm run dev -- --host 127.0.0.1",
+            task_id=raw_task_id,
+            background=True,
+        )
+    )
+
+    assert result["exit_code"] == 0
+    assert registry.calls[0]["task_id"] == raw_task_id
+
+
 def test_registering_cwd_override_updates_live_env_cwd(monkeypatch):
     """An ACP ``update_cwd`` (re-)registered mid-session must win over a
     previously ``cd``-ed live ``env.cwd``.
