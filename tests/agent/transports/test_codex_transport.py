@@ -83,13 +83,34 @@ class TestCodexBuildKwargs:
         )
         assert "reasoning" not in kw or kw.get("include") == []
 
-    def test_session_id_sets_cache_key(self, transport):
+    def test_cache_key_is_content_addressed_not_session_id(self, transport):
+        """prompt_cache_key is content-addressed from the static prefix
+        (instructions + tools), not the session_id. This keeps recurring cron
+        jobs — whose session_id carries a per-fire timestamp — on a stable warm
+        cache key. The key is a 'pck_' hash and must NOT equal session_id."""
         messages = [{"role": "user", "content": "Hi"}]
         kw = transport.build_kwargs(
             model="gpt-5.4", messages=messages, tools=[],
-            session_id="test-session-123",
+            session_id="cron_job42_20260624_143000",
         )
-        assert kw.get("prompt_cache_key") == "test-session-123"
+        pck = kw.get("prompt_cache_key", "")
+        assert pck.startswith("pck_")
+        assert pck != "cron_job42_20260624_143000"
+
+    def test_cache_key_stable_across_session_ids(self, transport):
+        """Same static prefix + different session_id (e.g. two cron fires of the
+        same job) must yield the same prompt_cache_key — the whole point of the
+        fix: repeated fires reuse the warm prefix instead of going cold."""
+        messages = [{"role": "user", "content": "Hi"}]
+        kw1 = transport.build_kwargs(
+            model="gpt-5.4", messages=messages, tools=[],
+            session_id="cron_job42_20260624_143000",
+        )
+        kw2 = transport.build_kwargs(
+            model="gpt-5.4", messages=messages, tools=[],
+            session_id="cron_job42_20260624_143500",
+        )
+        assert kw1["prompt_cache_key"] == kw2["prompt_cache_key"]
 
     def test_github_responses_no_cache_key(self, transport):
         messages = [{"role": "user", "content": "Hi"}]
@@ -118,7 +139,12 @@ class TestCodexBuildKwargs:
             is_xai_responses=True,
         )
         assert "prompt_cache_key" not in kw
-        assert kw.get("extra_body", {}).get("prompt_cache_key") == "conv-xai-1"
+        # Body-level prompt_cache_key is content-addressed (pck_ hash), not the
+        # raw session_id, so recurring cron fires stay on a stable warm key.
+        eb_pck = kw.get("extra_body", {}).get("prompt_cache_key", "")
+        assert eb_pck.startswith("pck_")
+        assert eb_pck != "conv-xai-1"
+        # x-grok-conv-id stays the session/transcript id, not the cache key.
         assert kw.get("extra_headers", {}).get("x-grok-conv-id") == "conv-xai-1"
 
     def test_xai_responses_extra_body_preserves_caller_fields(self, transport):
@@ -156,8 +182,10 @@ class TestCodexBuildKwargs:
         assert "max_output_tokens" not in kw
 
     def test_codex_backend_sets_cache_routing_headers(self, transport):
-        """Codex backend sends session_id / x-client-request-id as HTTP
-        headers (via extra_headers) for cache-scope routing."""
+        """Codex backend routes cache scope with the content-addressed
+        prompt_cache_key, not the raw session id. This keeps recurring cron
+        jobs warm while preserving the transcript/session id outside the cache
+        routing headers."""
         messages = [{"role": "user", "content": "Hi"}]
 
         kw = transport.build_kwargs(
@@ -168,11 +196,16 @@ class TestCodexBuildKwargs:
             is_codex_backend=True,
         )
 
+        pck = kw.get("prompt_cache_key", "")
+        assert pck.startswith("pck_")
+        assert pck != "conv-codex-1"
         headers = kw.get("extra_headers", {})
-        assert headers.get("session_id") == "conv-codex-1"
-        assert headers.get("x-client-request-id") == "conv-codex-1"
+        assert headers.get("session_id") == pck
+        assert headers.get("x-client-request-id") == pck
 
-    def test_codex_backend_no_headers_without_session_id(self, transport):
+    def test_codex_backend_sets_cache_headers_without_session_id(self, transport):
+        """A static prompt still has a content-addressed cache bucket even
+        when the caller has no transcript/session id available."""
         messages = [{"role": "user", "content": "Hi"}]
 
         kw = transport.build_kwargs(
@@ -182,7 +215,12 @@ class TestCodexBuildKwargs:
             is_codex_backend=True,
         )
 
-        assert "extra_headers" not in kw
+        pck = kw.get("prompt_cache_key", "")
+        assert pck.startswith("pck_")
+        assert kw.get("extra_headers") == {
+            "session_id": pck,
+            "x-client-request-id": pck,
+        }
 
     def test_codex_backend_preserves_caller_extra_headers(self, transport):
         messages = [{"role": "user", "content": "Hi"}]
@@ -196,10 +234,12 @@ class TestCodexBuildKwargs:
             request_overrides={"extra_headers": {"x-test": "1"}},
         )
 
+        pck = kw.get("prompt_cache_key", "")
+        assert pck.startswith("pck_")
         headers = kw.get("extra_headers", {})
         assert headers.get("x-test") == "1"
-        assert headers.get("session_id") == "conv-codex-1"
-        assert headers.get("x-client-request-id") == "conv-codex-1"
+        assert headers.get("session_id") == pck
+        assert headers.get("x-client-request-id") == pck
 
     def test_non_codex_responses_preserves_caller_extra_headers(self, transport):
         messages = [{"role": "user", "content": "Hi"}]
