@@ -7,6 +7,8 @@ Follows the same pattern as test_whatsapp_group_gating.py.
 import sys
 from unittest.mock import MagicMock
 
+import pytest
+
 from gateway.config import Platform, PlatformConfig
 
 
@@ -50,12 +52,28 @@ from plugins.platforms.slack.adapter import SlackAdapter  # noqa: E402
 # Helpers
 # ---------------------------------------------------------------------------
 
+
+@pytest.fixture(autouse=True)
+def _clear_live_slack_env(monkeypatch):
+    """Keep synthetic routing tests hermetic from the live Slack gateway env."""
+    for key in (
+        "SLACK_ALLOWED_CHANNELS",
+        "SLACK_FREE_RESPONSE_CHANNELS",
+        "SLACK_REQUIRE_MENTION",
+        "SLACK_STRICT_MENTION",
+        "SLACK_ALLOW_BOTS",
+        "SLACK_MENTION_PATTERNS",
+    ):
+        monkeypatch.delenv(key, raising=False)
+
+
 BOT_USER_ID = "U_BOT_123"
 CHANNEL_ID = "C0AQWDLHY9M"
 OTHER_CHANNEL_ID = "C9999999999"
 
 
-def _make_adapter(require_mention=None, strict_mention=None, free_response_channels=None, allowed_channels=None):
+def _make_adapter(require_mention=None, strict_mention=None, free_response_channels=None,
+                  allowed_channels=None, mention_patterns=None):
     extra = {}
     if require_mention is not None:
         extra["require_mention"] = require_mention
@@ -65,6 +83,8 @@ def _make_adapter(require_mention=None, strict_mention=None, free_response_chann
         extra["free_response_channels"] = free_response_channels
     if allowed_channels is not None:
         extra["allowed_channels"] = allowed_channels
+    if mention_patterns is not None:
+        extra["mention_patterns"] = mention_patterns
 
     adapter = object.__new__(SlackAdapter)
     adapter.platform = Platform.SLACK
@@ -249,7 +269,10 @@ def _would_process(adapter, *, is_dm=False, channel_id=CHANNEL_ID,
     bot_uid = adapter._team_bot_user_ids.get("T1", adapter._bot_user_id)
     if mentioned:
         text = f"<@{bot_uid}> {text}"
-    is_mentioned = bot_uid and f"<@{bot_uid}>" in text
+    is_mentioned = bool(
+        (bot_uid and f"<@{bot_uid}>" in text)
+        or adapter._slack_message_matches_mention_patterns(text)
+    )
 
     if not is_dm and bot_uid:
         # allowed_channels check (whitelist — must pass before other gating)
@@ -687,3 +710,61 @@ def test_config_bridges_slack_allowed_channels_env_takes_precedence(monkeypatch,
     import os as _os
     # env var must not be overwritten by config.yaml
     assert _os.environ["SLACK_ALLOWED_CHANNELS"] == OTHER_CHANNEL_ID
+
+
+# ---------------------------------------------------------------------------
+# Tests: mention_patterns (wake words) — parity with other adapters (#50732)
+# ---------------------------------------------------------------------------
+
+def test_mention_patterns_default_no_match(monkeypatch):
+    monkeypatch.delenv("SLACK_MENTION_PATTERNS", raising=False)
+    adapter = _make_adapter()
+    assert adapter._slack_mention_patterns() == []
+    assert adapter._slack_message_matches_mention_patterns("hello there") is False
+
+
+def test_mention_patterns_list_matches():
+    adapter = _make_adapter(mention_patterns=["hey hermes", "hermes,"])
+    assert adapter._slack_message_matches_mention_patterns("hey hermes, you there?") is True
+    assert adapter._slack_message_matches_mention_patterns("just chatting") is False
+
+
+def test_mention_patterns_case_insensitive():
+    adapter = _make_adapter(mention_patterns=["hey hermes"])
+    assert adapter._slack_message_matches_mention_patterns("HEY HERMES!") is True
+
+
+def test_mention_patterns_single_string():
+    adapter = _make_adapter(mention_patterns="^hermes")
+    assert adapter._slack_message_matches_mention_patterns("hermes do this") is True
+    assert adapter._slack_message_matches_mention_patterns("ok hermes") is False
+
+
+def test_mention_patterns_invalid_regex_skipped_without_crash():
+    # An invalid pattern is dropped; valid siblings still work.
+    adapter = _make_adapter(mention_patterns=["(unclosed", "hey hermes"])
+    assert adapter._slack_message_matches_mention_patterns("hey hermes") is True
+
+
+def test_mention_patterns_env_var_fallback(monkeypatch):
+    monkeypatch.setenv("SLACK_MENTION_PATTERNS", '["hey hermes", "hermes,"]')
+    adapter = _make_adapter()  # no config value -> falls back to env
+    assert adapter._slack_message_matches_mention_patterns("hey hermes") is True
+
+
+def test_mention_patterns_env_var_csv_fallback_splits_patterns(monkeypatch):
+    monkeypatch.setenv("SLACK_MENTION_PATTERNS", "hey hermes,hermes,")
+    adapter = _make_adapter()  # no config value -> falls back to env
+
+    patterns = adapter._slack_mention_patterns()
+
+    assert [pattern.pattern for pattern in patterns] == ["hey hermes", "hermes"]
+    assert adapter._slack_message_matches_mention_patterns("hey hermes") is True
+
+
+def test_mention_patterns_trigger_in_channel_without_literal_mention():
+    """A wake word triggers the bot in a channel even with require_mention on."""
+    adapter = _make_adapter(require_mention=True, mention_patterns=["hey hermes"])
+    assert _would_process(adapter, text="hey hermes what's the status") is True
+    # Unrelated channel chatter is still ignored.
+    assert _would_process(adapter, text="lunch anyone?") is False
