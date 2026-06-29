@@ -14,7 +14,15 @@ import os
 import threading
 from pathlib import Path
 
+import pytest
+
 import hermes_constants
+
+
+@pytest.fixture(autouse=True)
+def _isolate_parent_real_home(monkeypatch):
+    """Keep the runner's Hermes HOME bridge from leaking into unit cases."""
+    monkeypatch.delenv("HERMES_REAL_HOME", raising=False)
 
 
 
