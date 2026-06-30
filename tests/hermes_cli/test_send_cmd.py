@@ -127,6 +127,39 @@ def test_json_mode_emits_payload(fake_tool, capsys):
     assert payload.get("message_id") == "m123"
 
 
+def test_explicit_cli_send_strips_cron_auto_delivery_env(monkeypatch, capsys):
+    import os
+    import sys as _sys
+    import types as _types
+
+    seen_env = {}
+    fake_mod = _types.ModuleType("tools.send_message_tool")
+
+    def _tool(args, **_kw):
+        for key in send_cmd._CRON_AUTO_DELIVERY_ENV:
+            seen_env[key] = os.environ.get(key)
+        return json.dumps({"success": True, "message_id": "m456"})
+
+    setattr(fake_mod, "send_message_tool", _tool)
+    monkeypatch.setitem(_sys.modules, "tools.send_message_tool", fake_mod)
+    monkeypatch.setenv("HERMES_CRON_AUTO_DELIVER_PLATFORM", "slack")
+    monkeypatch.setenv("HERMES_CRON_AUTO_DELIVER_CHAT_ID", "C0BBQ0PLX4Z")
+    monkeypatch.setenv("HERMES_CRON_AUTO_DELIVER_THREAD_ID", "")
+
+    args = _parse(["--to", "slack:C0BBQ0PLX4Z", "--json", "draft"])
+    with pytest.raises(SystemExit) as exc:
+        send_cmd.cmd_send(args)
+
+    assert exc.value.code == 0
+    assert seen_env == {
+        "HERMES_CRON_AUTO_DELIVER_PLATFORM": None,
+        "HERMES_CRON_AUTO_DELIVER_CHAT_ID": None,
+        "HERMES_CRON_AUTO_DELIVER_THREAD_ID": None,
+    }
+    out = capsys.readouterr().out
+    assert json.loads(out)["message_id"] == "m456"
+
+
 def test_quiet_suppresses_stdout(fake_tool, capsys):
     args = _parse(["--to", "telegram", "--quiet", "shh"])
     with pytest.raises(SystemExit) as exc:

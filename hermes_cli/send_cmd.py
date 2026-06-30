@@ -37,6 +37,25 @@ _USAGE_EXIT = 2
 _FAILURE_EXIT = 1
 _SUCCESS_EXIT = 0
 
+# `hermes send` is an explicit CLI side effect. When it is invoked from inside a
+# cron agent turn, terminal() bridges HERMES_CRON_AUTO_DELIVER_* into the child
+# environment so the model-facing send_message tool can suppress duplicate final
+# deliveries. That guard is wrong for the CLI: if a script/operator explicitly
+# runs `hermes send --to ...`, it should send, not silently return a skipped
+# no-op. Strip those vars before calling the shared tool.
+_CRON_AUTO_DELIVERY_ENV = (
+    "HERMES_CRON_AUTO_DELIVER_PLATFORM",
+    "HERMES_CRON_AUTO_DELIVER_CHAT_ID",
+    "HERMES_CRON_AUTO_DELIVER_THREAD_ID",
+)
+
+
+def _strip_cron_auto_delivery_env_for_explicit_cli_send() -> None:
+    import os
+
+    for key in _CRON_AUTO_DELIVERY_ENV:
+        os.environ.pop(key, None)
+
 
 def _read_message_body(
     positional: Optional[str],
@@ -310,6 +329,8 @@ def cmd_send(args: argparse.Namespace) -> None:
         platform_filter = getattr(args, "message", None)
         exit_code = _list_targets(platform_filter, json_mode=getattr(args, "json", False))
         sys.exit(exit_code)
+
+    _strip_cron_auto_delivery_env_for_explicit_cli_send()
 
     target = _resolve_target(getattr(args, "to", None))
     if not target:
