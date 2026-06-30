@@ -354,8 +354,11 @@ class TestCliApprovalUi:
             chat_console.return_value.print = MagicMock()
             cli._handle_background_command("/btw check weather")
 
-            deadline = time.time() + 2
-            while cli._background_tasks and time.time() < deadline:
+            deadline = time.time() + 10
+            while (
+                ("approval" not in seen or cli._background_tasks)
+                and time.time() < deadline
+            ):
                 time.sleep(0.01)
 
         assert seen["approval"].__self__ is cli

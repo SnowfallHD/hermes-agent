@@ -1206,6 +1206,7 @@ class GatewaySlashCommandsMixin:
                         user_providers=user_provs,
                         custom_providers=custom_provs,
                         max_models=50,
+                        include_moa=True,
                     )
                 except Exception:
                     providers = []
@@ -1227,7 +1228,12 @@ class GatewaySlashCommandsMixin:
                         skew_error = _model_switch_skew_guard()
                         if skew_error:
                             return skew_error
-                        result = _switch_model(
+                        # Offload the switch off the event loop — switch_model()
+                        # can fall through to a synchronous models.dev HTTP fetch
+                        # (requests.get, 15s timeout) on a cold/expired cache,
+                        # which freezes the gateway otherwise. See #20525, #41289.
+                        result = await asyncio.to_thread(
+                            _switch_model,
                             raw_input=model_id,
                             current_provider=_cur_provider,
                             current_model=_cur_model,
@@ -1355,7 +1361,7 @@ class GatewaySlashCommandsMixin:
                                 if result.base_url:
                                     _persist_model_cfg["base_url"] = result.base_url
                                 if str(result.target_provider or "").strip().lower() != "custom":
-                                    clear_model_endpoint_credentials(_persist_model_cfg)
+                                    clear_model_endpoint_credentials(_persist_model_cfg, clear_base_url=True)
                                 from hermes_cli.config import save_config
                                 save_config(_persist_cfg)
                             except Exception as e:
@@ -1391,8 +1397,6 @@ class GatewaySlashCommandsMixin:
                         if mi:
                             if mi.max_output:
                                 lines.append(t("gateway.model.max_output_label", tokens=f"{mi.max_output:,}"))
-                            if mi.has_cost_data():
-                                lines.append(t("gateway.model.cost_label", cost=mi.format_cost()))
                             lines.append(t("gateway.model.capabilities_label", capabilities=mi.format_capabilities()))
                         if result.warning_message:
                             lines.append(t("gateway.model.warning_prefix", warning=result.warning_message))
@@ -1453,7 +1457,12 @@ class GatewaySlashCommandsMixin:
         skew_error = _model_switch_skew_guard()
         if skew_error:
             return skew_error
-        result = _switch_model(
+        # Offload the switch off the event loop — switch_model() can fall
+        # through to a synchronous models.dev HTTP fetch (requests.get, 15s
+        # timeout) on a cold/expired cache, which freezes the gateway
+        # otherwise. See #20525, #41289.
+        result = await asyncio.to_thread(
+            _switch_model,
             raw_input=model_input,
             current_provider=current_provider,
             current_model=current_model,
@@ -1589,7 +1598,7 @@ class GatewaySlashCommandsMixin:
                     if result.base_url:
                         model_cfg["base_url"] = result.base_url
                     if str(result.target_provider or "").strip().lower() != "custom":
-                        clear_model_endpoint_credentials(model_cfg)
+                        clear_model_endpoint_credentials(model_cfg, clear_base_url=True)
                     from hermes_cli.config import save_config
                     save_config(cfg)
                 except Exception as e:
@@ -1628,8 +1637,6 @@ class GatewaySlashCommandsMixin:
             if mi:
                 if mi.max_output:
                     lines.append(t("gateway.model.max_output_label", tokens=f"{mi.max_output:,}"))
-                if mi.has_cost_data():
-                    lines.append(t("gateway.model.cost_label", cost=mi.format_cost()))
                 lines.append(t("gateway.model.capabilities_label", capabilities=mi.format_capabilities()))
 
             # Cache notice
@@ -2828,9 +2835,14 @@ class GatewaySlashCommandsMixin:
                 skip_memory=True,
                 enabled_toolsets=["memory"],
                 session_id=session_entry.session_id,
+                session_db=self._session_db,
             )
             try:
                 tmp_agent._print_fn = lambda *a, **kw: None
+                # Prevent close() from ending the newly rotated session —
+                # the gateway session entry now points at the new id and
+                # must remain open for the next user turn.
+                tmp_agent._end_session_on_close = False
 
                 # Estimate with system prompt + tool schemas included so the
                 # figure reflects real request pressure, not a transcript-only
@@ -2864,7 +2876,7 @@ class GatewaySlashCommandsMixin:
                 # transcript replaced with the compacted set).
                 new_session_id = tmp_agent.session_id
                 rotated = new_session_id != session_entry.session_id
-                _in_place = bool(getattr(tmp_agent, "compression_in_place", False))
+                _in_place = bool(getattr(tmp_agent, "_last_compaction_in_place", False))
                 if rotated:
                     session_entry.session_id = new_session_id
                     self.session_store._save()
@@ -3231,6 +3243,20 @@ class GatewaySlashCommandsMixin:
             return t("gateway.resume.switch_failed")
         self._clear_session_boundary_security_state(session_key)
 
+        # Clear session-scoped model/reasoning overrides so the resumed
+        # conversation picks up configured defaults instead of a /model
+        # switch made in the previous session under the same chat
+        # session_key. /resume is a conversation boundary just like /new
+        # (which clears these too); without this, a stale override leaks
+        # across the switch. See #10702.
+        _overrides = getattr(self, "_session_model_overrides", None)
+        if isinstance(_overrides, dict):
+            _overrides.pop(session_key, None)
+        self._set_session_reasoning_override(session_key, None)
+        _pending_notes = getattr(self, "_pending_model_notes", None)
+        if isinstance(_pending_notes, dict):
+            _pending_notes.pop(session_key, None)
+
         # Evict any cached agent for this session so the next message
         # rebuilds with the correct session_id end-to-end — mirrors
         # /branch and /reset. Without this, the cached AIAgent (and its
@@ -3519,41 +3545,13 @@ class GatewaySlashCommandsMixin:
             # Session token usage — detailed breakdown matching CLI
             input_tokens = getattr(agent, "session_input_tokens", 0) or 0
             output_tokens = getattr(agent, "session_output_tokens", 0) or 0
-            cache_read = getattr(agent, "session_cache_read_tokens", 0) or 0
-            cache_write = getattr(agent, "session_cache_write_tokens", 0) or 0
 
             lines.append(t("gateway.usage.header_session"))
             lines.append(t("gateway.usage.label_model", model=agent.model))
             lines.append(t("gateway.usage.label_input_tokens", count=f"{input_tokens:,}"))
-            if cache_read:
-                lines.append(t("gateway.usage.label_cache_read", count=f"{cache_read:,}"))
-            if cache_write:
-                lines.append(t("gateway.usage.label_cache_write", count=f"{cache_write:,}"))
             lines.append(t("gateway.usage.label_output_tokens", count=f"{output_tokens:,}"))
             lines.append(t("gateway.usage.label_total", count=f"{agent.session_total_tokens:,}"))
             lines.append(t("gateway.usage.label_api_calls", count=agent.session_api_calls))
-
-            # Cost estimation
-            try:
-                from agent.usage_pricing import CanonicalUsage, estimate_usage_cost
-                cost_result = estimate_usage_cost(
-                    agent.model,
-                    CanonicalUsage(
-                        input_tokens=input_tokens,
-                        output_tokens=output_tokens,
-                        cache_read_tokens=cache_read,
-                        cache_write_tokens=cache_write,
-                    ),
-                    provider=getattr(agent, "provider", None),
-                    base_url=getattr(agent, "base_url", None),
-                )
-                if cost_result.amount_usd is not None:
-                    prefix = "~" if cost_result.status == "estimated" else ""
-                    lines.append(t("gateway.usage.label_cost", prefix=prefix, amount=f"{float(cost_result.amount_usd):.4f}"))
-                elif cost_result.status == "included":
-                    lines.append(t("gateway.usage.label_cost_included"))
-            except Exception:
-                pass
 
             # Context window and compressions
             ctx = agent.context_compressor

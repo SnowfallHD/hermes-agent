@@ -245,6 +245,50 @@ from cron.jobs import get_due_jobs, mark_job_run, save_job_output, advance_next_
 # locally for audit.
 SILENT_MARKER = "[SILENT]"
 
+# Canonical silence tokens recognized in cron output.  Cron's contract is
+# intentionally looser than the gateway's exact-whole-response rule: the cron
+# system prompt *instructs* the agent to emit "[SILENT]", and real agents often
+# bracket it with a short note or trailing newline.  We therefore suppress when
+# a marker is the entire response OR appears as its own first/last line — but
+# NOT when a token merely appears mid-sentence in a genuine report (e.g.
+# "I considered staying [SILENT] but here is the summary…" must deliver).
+_CRON_SILENCE_TOKENS = frozenset({"[SILENT]", "SILENT", "NO_REPLY", "NO REPLY"})
+
+
+def _is_cron_silence_response(text: str) -> bool:
+    """Return True when a cron final response should suppress delivery.
+
+    Recognizes the bracketed ``[SILENT]`` sentinel (whole-response, first line,
+    or last line) plus the bracketless ``SILENT`` / ``NO_REPLY`` / ``NO REPLY``
+    variants the model emits when it drops the brackets (#51438, #46917).
+    Whitespace-trimmed and case-insensitive.  A token buried mid-sentence is
+    treated as real content and delivered.
+    """
+    if not isinstance(text, str):
+        return False
+    stripped = text.strip()
+    if not stripped:
+        return False
+
+    def _is_token(line: str) -> bool:
+        return " ".join(line.strip().upper().split()) in _CRON_SILENCE_TOKENS
+
+    # Whole response is exactly a token.
+    if _is_token(stripped):
+        return True
+    # Marker on its own first or last line (trailing/leading note on a
+    # separate line — e.g. "2 deals filtered\n\n[SILENT]").
+    lines = [ln for ln in stripped.splitlines() if ln.strip()]
+    if lines and (_is_token(lines[0]) or _is_token(lines[-1])):
+        return True
+    # Bracketed sentinel used as a same-line prefix — the documented cron
+    # pattern "[SILENT] No changes detected".  Restricted to the bracketed
+    # form so a bare word like "Silent retry succeeded" is NOT swallowed.
+    upper = stripped.upper()
+    if upper.startswith("[SILENT]"):
+        return True
+    return False
+
 # ---------------------------------------------------------------------------
 # Persistent thread pool for parallel cron jobs.
 # The tick function submits jobs here and returns immediately so the ticker
@@ -313,7 +357,14 @@ _hermes_home: Path | None = None
 
 
 def _get_hermes_home() -> Path:
-    """Resolve Hermes home dynamically while preserving test monkeypatch hooks."""
+    """Resolve Hermes home dynamically while preserving test monkeypatch hooks.
+
+    Cron is per-profile by design (#4707): the in-process ticker runs inside a
+    profile-scoped gateway, so resolving the active HERMES_HOME at call time
+    means a profile's jobs are stored AND executed under that profile's home
+    (its .env, config.yaml, scripts, skills). Do not freeze this at import or
+    anchor it at the shared default root — either re-breaks profile isolation.
+    """
     return _hermes_home or get_hermes_home()
 
 
@@ -2526,7 +2577,7 @@ def _run_job_impl(job: dict) -> tuple[bool, str, str, Optional[str]]:
         max_iterations = _cfg.get("agent", {}).get("max_turns") or _cfg.get("max_turns") or 90
 
         # Provider routing
-        pr = _cfg.get("provider_routing", {})
+        pr = _cfg.get("provider_routing") or {}
 
         from hermes_cli.runtime_provider import (
             resolve_runtime_provider,
@@ -2835,6 +2886,27 @@ def _run_job_impl(job: dict) -> tuple[bool, str, str, Optional[str]]:
         # Strip leaked placeholder text that upstream may inject on empty completions.
         if final_response.strip() == "(No response generated)":
             final_response = ""
+        # Cron silence on abnormal empty turns.  The turn-completion explainer
+        # (#34452) replaces a blank/empty model turn with a "⚠️ No reply: …"
+        # string so interactive surfaces (CLI/gateway) explain why the box is
+        # empty.  In a cron context that turns a previously-silent empty turn
+        # into a delivered warning (Manfredi's Telegram symptom).  Detect the
+        # explainer text deterministically (via the same formatter that
+        # produced it) and treat it as empty so the empty-response suppression
+        # and soft-failure marking below apply — restoring pre-#34452 silence
+        # for scheduled jobs without disabling the explainer everywhere.
+        if final_response.strip() and turn_exit_reason:
+            try:
+                _explainer_text = AIAgent._format_turn_completion_explanation(turn_exit_reason)
+            except Exception:
+                _explainer_text = ""
+            if _explainer_text and final_response.strip() == _explainer_text.strip():
+                logger.info(
+                    "Job '%s': abnormal empty turn (%s) — suppressing explainer for cron delivery",
+                    job_id,
+                    turn_exit_reason,
+                )
+                final_response = ""
         # Use a separate variable for log display; keep final_response clean
         # for delivery logic (empty response = no delivery).
         logged_response = final_response if final_response else "(No response generated)"
@@ -2963,7 +3035,13 @@ def run_one_job(job: dict, *, adapters=None, loop=None, verbose: bool = False) -
         # responses: do not deliver a blank message, and let the
         # empty-response guard below mark the run as a soft failure.
         should_deliver = bool(deliver_content.strip())
-        if should_deliver and success and SILENT_MARKER in deliver_content.strip().upper():
+        # Cron silence suppression — see _is_cron_silence_response.  Replaces the
+        # old `SILENT_MARKER in ...upper()` substring check, which both leaked
+        # bracketless near-markers ("SILENT" / "NO_REPLY") and wrongly swallowed
+        # a real report that merely quoted "[SILENT]" mid-sentence (#51438,
+        # #46917).  Keeps the intentional bracketed-prefix / trailing-line
+        # tolerance the cron contract relies on.
+        if should_deliver and success and _is_cron_silence_response(deliver_content):
             logger.info("Job '%s': agent returned %s — skipping delivery", job["id"], SILENT_MARKER)
             should_deliver = False
 
