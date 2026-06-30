@@ -175,7 +175,17 @@ def test_gateway_pid_scan_hides_wmic_and_powershell_windows(monkeypatch):
     monkeypatch.setattr(gateway.subprocess, "run", fake_run)
 
     assert gateway._scan_gateway_pids(set()) == [123]
-    assert [kwargs["creationflags"] for _, kwargs in captured] == [
+
+    # This test patches the shared subprocess module object used by the gateway
+    # module. In the sharded CI runner, unrelated subprocess calls from cleanup
+    # or background probes can land in the capture list while this monkeypatch is
+    # active. Assert only the Windows process-table probes this regression covers.
+    windows_probe_calls = [
+        (cmd, kwargs)
+        for cmd, kwargs in captured
+        if cmd and cmd[0] in {"wmic", "powershell", "pwsh"}
+    ]
+    assert [kwargs["creationflags"] for _, kwargs in windows_probe_calls] == [
         _CREATE_NO_WINDOW,
         _CREATE_NO_WINDOW,
     ]
