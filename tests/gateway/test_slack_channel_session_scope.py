@@ -38,6 +38,8 @@ def adapter():
     a._bot_user_id = "U_BOT"
     a._running = True
     a.handle_message = AsyncMock()
+    a._fetch_thread_context = AsyncMock(return_value="")
+    a._fetch_thread_parent_text = AsyncMock(return_value=None)
     return a
 
 
@@ -47,6 +49,9 @@ def _redirect_cache(tmp_path, monkeypatch):
     monkeypatch.setattr(
         "gateway.platforms.base.DOCUMENT_CACHE_DIR", tmp_path / "doc_cache"
     )
+    monkeypatch.delenv("SLACK_ALLOWED_CHANNELS", raising=False)
+    monkeypatch.delenv("SLACK_FREE_RESPONSE_CHANNELS", raising=False)
+    monkeypatch.delenv("SLACK_REQUIRE_MENTION", raising=False)
 
 
 def _channel_event(text: str, ts: str, thread_ts: str = None) -> dict:

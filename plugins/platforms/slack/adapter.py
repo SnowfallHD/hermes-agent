@@ -3174,6 +3174,9 @@ class SlackAdapter(BasePlatformAdapter):
             # (they carry no user_id to match against the allowlist).
             is_bot=bool(event.get("bot_id")) or event.get("subtype") == "bot_message",
         )
+        routed_profile = self._slack_profile_for_channel(channel_id)
+        if routed_profile:
+            source.profile = routed_profile
 
         # Per-channel ephemeral prompt
         from gateway.platforms.base import (
@@ -4226,6 +4229,29 @@ class SlackAdapter(BasePlatformAdapter):
         if isinstance(raw, str) and raw.strip():
             return {part.strip() for part in raw.split(",") if part.strip()}
         return set()
+
+    def _slack_profile_channels(self) -> Dict[str, str]:
+        """Return Slack channel/chat IDs mapped to Hermes profile names.
+
+        Routing is behavioral config, not a credential. The gateway performs
+        profile isolation after this adapter stamps ``source.profile``.
+        """
+        raw = self.config.extra.get("profile_channels") if self.config.extra else None
+        if not isinstance(raw, dict):
+            return {}
+        routes: Dict[str, str] = {}
+        for channel_id, profile in raw.items():
+            channel = str(channel_id).strip()
+            target = str(profile).strip()
+            if channel and target:
+                routes[channel] = target
+        return routes
+
+    def _slack_profile_for_channel(self, channel_id: str) -> Optional[str]:
+        """Resolve the routed Hermes profile for a Slack channel/chat ID."""
+        if not channel_id:
+            return None
+        return self._slack_profile_channels().get(str(channel_id).strip())
 
     def _slack_mention_patterns(self) -> List["re.Pattern"]:
         """Compile optional regex wake-word patterns for channel triggers.

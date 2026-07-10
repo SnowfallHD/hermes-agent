@@ -1230,6 +1230,16 @@ def load_gateway_config() -> GatewayConfig:
                     bridged["group_user_allowed_commands"] = platform_cfg["group_user_allowed_commands"]
                 if plat in {Platform.DISCORD, Platform.SLACK} and "channel_skill_bindings" in platform_cfg:
                     bridged["channel_skill_bindings"] = platform_cfg["channel_skill_bindings"]
+                if plat == Platform.SLACK and "profile_channels" in platform_cfg:
+                    profile_channels = platform_cfg["profile_channels"]
+                    if isinstance(profile_channels, dict):
+                        bridged["profile_channels"] = {
+                            str(channel_id): str(profile).strip()
+                            for channel_id, profile in profile_channels.items()
+                            if str(channel_id).strip() and str(profile).strip()
+                        }
+                    else:
+                        bridged["profile_channels"] = profile_channels
                 if "channel_prompts" in platform_cfg:
                     channel_prompts = platform_cfg["channel_prompts"]
                     if isinstance(channel_prompts, dict):
